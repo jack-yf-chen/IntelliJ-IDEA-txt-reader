@@ -33,7 +33,9 @@ import javax.swing.JCheckBox
 import javax.swing.JComboBox
 import javax.swing.JComponent
 import javax.swing.Icon
+import javax.swing.DefaultListCellRenderer
 import javax.swing.JLabel
+import javax.swing.JList
 import javax.swing.JPanel
 import javax.swing.JTextPane
 import javax.swing.KeyStroke
@@ -78,6 +80,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     init {
         border = JBUI.Borders.empty(8)
         registerPanel(project, this)
+        configureChapterSelector()
         initializeFontSelector()
         initializeTextColorSelector()
         initializeThemeSelector()
@@ -157,18 +160,14 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
 
     private fun createToolbar(): JPanel {
         val toolbar = JPanel(BorderLayout(0, JBUI.scale(6)))
-        val mainRow = JPanel(BorderLayout(JBUI.scale(6), 0))
-        val leftPanel = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(6), 0))
-        val rightPanel = JPanel(FlowLayout(FlowLayout.RIGHT, JBUI.scale(6), 0))
+        val mainRow = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(6), 0))
         val settingsPanel = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(6), 0))
 
-        leftPanel.add(openButton)
-        leftPanel.add(previousButton)
-        rightPanel.add(nextButton)
-        rightPanel.add(settingsButton)
-        mainRow.add(leftPanel, BorderLayout.WEST)
-        mainRow.add(chapterSelector, BorderLayout.CENTER)
-        mainRow.add(rightPanel, BorderLayout.EAST)
+        mainRow.add(openButton)
+        mainRow.add(previousButton)
+        mainRow.add(chapterSelector)
+        mainRow.add(nextButton)
+        mainRow.add(settingsButton)
 
         settingsPanel.add(smallerButton)
         settingsPanel.add(largerButton)
@@ -182,7 +181,10 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         settingsPanel.isVisible = false
         settingsPanel.name = SETTINGS_PANEL_NAME
 
-        chapterSelector.minimumSize = Dimension(0, chapterSelector.preferredSize.height)
+        val chapterSelectorSize = Dimension(JBUI.scale(CHAPTER_SELECTOR_WIDTH), chapterSelector.preferredSize.height)
+        chapterSelector.minimumSize = chapterSelectorSize
+        chapterSelector.preferredSize = chapterSelectorSize
+        chapterSelector.maximumSize = chapterSelectorSize
         fontSelector.minimumSize = Dimension(JBUI.scale(120), fontSelector.preferredSize.height)
         fontSelector.preferredSize = Dimension(JBUI.scale(150), fontSelector.preferredSize.height)
         textColorSelector.preferredSize = Dimension(JBUI.scale(100), textColorSelector.preferredSize.height)
@@ -192,6 +194,32 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         toolbar.add(mainRow, BorderLayout.NORTH)
         toolbar.add(settingsPanel, BorderLayout.CENTER)
         return toolbar
+    }
+
+    private fun configureChapterSelector() {
+        chapterSelector.maximumRowCount = 14
+        chapterSelector.renderer = object : DefaultListCellRenderer() {
+            override fun getListCellRendererComponent(
+                list: JList<*>?,
+                value: Any?,
+                index: Int,
+                isSelected: Boolean,
+                cellHasFocus: Boolean,
+            ): java.awt.Component {
+                val component = super.getListCellRendererComponent(
+                    list,
+                    value,
+                    index,
+                    isSelected,
+                    cellHasFocus,
+                )
+                if (component is JLabel && value is Chapter) {
+                    component.text = compactChapterTitle(value, index)
+                    component.toolTipText = value.title
+                }
+                return component
+            }
+        }
     }
 
     override fun removeNotify() {
@@ -300,6 +328,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
 
         updatingChapterSelector = true
         chapterSelector.selectedIndex = index
+        chapterSelector.toolTipText = chapter.title
         updatingChapterSelector = false
 
         SwingUtilities.invokeLater {
@@ -493,6 +522,15 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         return readerThemes.firstOrNull { it.name == stateService.state.themeName } ?: readerThemes.first()
     }
 
+    private fun compactChapterTitle(chapter: Chapter, index: Int): String {
+        val title = chapter.title.trim()
+        chapterPrefix.find(title)?.let { return it.value }
+        englishChapterPrefix.find(title)?.let { return it.value }
+
+        val realIndex = if (index >= 0) index else currentBook?.chapters?.indexOf(chapter).orZero()
+        return "第 ${realIndex + 1} 章"
+    }
+
     private fun selectedTextColor(): Color? = textColors[stateService.state.textColorName]
 
     fun updateButtonStyle() {
@@ -587,8 +625,11 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         )
 
         private const val SETTINGS_PANEL_NAME = "reader-settings-panel"
+        private const val CHAPTER_SELECTOR_WIDTH = 96
         private const val BUTTON_STYLE_TEXT = "文字"
         private const val BUTTON_STYLE_ICON = "图标"
+        private val chapterPrefix = Regex("""^第[0-9零〇一二两三四五六七八九十百千万]{1,12}[章节回卷集部篇]""")
+        private val englishChapterPrefix = Regex("""(?i)^chapter\s+\d+""")
         private val panelsByProject = WeakHashMap<Project, MutableSet<ReaderPanel>>()
 
         private fun registerPanel(project: Project, panel: ReaderPanel) {
@@ -607,6 +648,8 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         }
     }
 }
+
+private fun Int?.orZero(): Int = this ?: 0
 
 private data class ReaderTheme(
     val name: String,
