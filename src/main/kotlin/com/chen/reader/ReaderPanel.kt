@@ -8,13 +8,11 @@ import com.intellij.ui.components.JBScrollPane
 import com.intellij.util.ui.JBUI
 import java.awt.BorderLayout
 import java.awt.Color
-import java.awt.Component
 import java.awt.Cursor
 import java.awt.Dimension
 import java.awt.FlowLayout
 import java.awt.Font
 import java.awt.GraphicsEnvironment
-import java.awt.GridLayout
 import java.awt.Point
 import java.awt.Toolkit
 import java.awt.event.ComponentAdapter
@@ -33,7 +31,6 @@ import javax.swing.JComboBox
 import javax.swing.JComponent
 import javax.swing.JLabel
 import javax.swing.JPanel
-import javax.swing.JScrollBar
 import javax.swing.JTextPane
 import javax.swing.KeyStroke
 import javax.swing.SwingUtilities
@@ -50,6 +47,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     private val largerButton = JButton("A+")
     private val tighterLineButton = JButton("行距-")
     private val looserLineButton = JButton("行距+")
+    private val settingsButton = JButton("设置")
     private val chapterSelector = JComboBox<Chapter>()
     private val fontSelector = JComboBox(loadFontFamilies().toTypedArray())
     private val themeSelector = JComboBox(readerThemes.map { it.name }.toTypedArray())
@@ -67,6 +65,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     private var updatingThemeSelector = false
     private var updatingWidthSelector = false
     private var suppressBoundaryNavigation = false
+    private var settingsVisible = false
     private var lastScrollValue = 0
 
     init {
@@ -94,6 +93,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         largerButton.addActionListener { changeFontSize(1) }
         tighterLineButton.addActionListener { changeLineSpacing(-10) }
         looserLineButton.addActionListener { changeLineSpacing(10) }
+        settingsButton.addActionListener { toggleSettingsPanel() }
         fontSelector.addActionListener {
             if (!updatingFontSelector) {
                 stateService.state.fontFamily = fontSelector.selectedItem as? String
@@ -141,23 +141,29 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
 
     private fun createToolbar(): JPanel {
         val toolbar = JPanel(BorderLayout(0, JBUI.scale(6)))
-        val buttonRows = JPanel(GridLayout(0, 1, 0, JBUI.scale(4)))
-        val navigationPanel = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(6), 0))
-        val readingPanel = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(6), 0))
+        val mainRow = JPanel(BorderLayout(JBUI.scale(6), 0))
+        val leftPanel = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(6), 0))
+        val rightPanel = JPanel(FlowLayout(FlowLayout.RIGHT, JBUI.scale(6), 0))
+        val settingsPanel = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(6), 0))
 
-        navigationPanel.add(openButton)
-        navigationPanel.add(previousButton)
-        navigationPanel.add(nextButton)
-        readingPanel.add(smallerButton)
-        readingPanel.add(largerButton)
-        readingPanel.add(tighterLineButton)
-        readingPanel.add(looserLineButton)
-        readingPanel.add(fontSelector)
-        readingPanel.add(themeSelector)
-        readingPanel.add(widthSelector)
-        readingPanel.add(hideCursorCheckBox)
-        buttonRows.add(navigationPanel)
-        buttonRows.add(readingPanel)
+        leftPanel.add(openButton)
+        leftPanel.add(previousButton)
+        rightPanel.add(nextButton)
+        rightPanel.add(settingsButton)
+        mainRow.add(leftPanel, BorderLayout.WEST)
+        mainRow.add(chapterSelector, BorderLayout.CENTER)
+        mainRow.add(rightPanel, BorderLayout.EAST)
+
+        settingsPanel.add(smallerButton)
+        settingsPanel.add(largerButton)
+        settingsPanel.add(tighterLineButton)
+        settingsPanel.add(looserLineButton)
+        settingsPanel.add(fontSelector)
+        settingsPanel.add(themeSelector)
+        settingsPanel.add(widthSelector)
+        settingsPanel.add(hideCursorCheckBox)
+        settingsPanel.isVisible = false
+        settingsPanel.name = SETTINGS_PANEL_NAME
 
         chapterSelector.minimumSize = Dimension(0, chapterSelector.preferredSize.height)
         fontSelector.minimumSize = Dimension(JBUI.scale(120), fontSelector.preferredSize.height)
@@ -165,9 +171,22 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         themeSelector.preferredSize = Dimension(JBUI.scale(100), themeSelector.preferredSize.height)
         widthSelector.preferredSize = Dimension(JBUI.scale(80), widthSelector.preferredSize.height)
 
-        toolbar.add(buttonRows, BorderLayout.NORTH)
-        toolbar.add(chapterSelector, BorderLayout.CENTER)
+        toolbar.add(mainRow, BorderLayout.NORTH)
+        toolbar.add(settingsPanel, BorderLayout.CENTER)
         return toolbar
+    }
+
+    private fun toggleSettingsPanel() {
+        settingsVisible = !settingsVisible
+        settingsButton.text = if (settingsVisible) "收起" else "设置"
+        findSettingsPanel()?.isVisible = settingsVisible
+        revalidate()
+        repaint()
+    }
+
+    private fun findSettingsPanel(): JPanel? {
+        val toolbar = getComponent(0) as? JPanel ?: return null
+        return toolbar.components.filterIsInstance<JPanel>().firstOrNull { it.name == SETTINGS_PANEL_NAME }
     }
 
     private fun initializeFontSelector() {
@@ -492,6 +511,8 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             Font.SANS_SERIF,
             Font.MONOSPACED,
         )
+
+        private const val SETTINGS_PANEL_NAME = "reader-settings-panel"
     }
 }
 
