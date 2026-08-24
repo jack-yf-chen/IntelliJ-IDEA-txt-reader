@@ -76,6 +76,7 @@ Date: 2026-08-24
 - 2026-08-24: Started `runIde` successfully. The sandbox IntelliJ IDEA 2026.1.3 Welcome window opened, the project trust dialog was reached, and the Microsoft Defender exclusion checkbox was cleared before trusting. Further UI verification was stopped when the user pressed Escape to stop Computer Use.
 - 2026-08-24: Fixed toolbar clipping when the Novel Reader tool window is narrow. The action buttons now stay on the first row and the chapter selector fills a second row, preventing the chapter selector and later buttons from being hidden.
 - 2026-08-24: Added reading comfort controls. The reader now uses `JTextPane` with paragraph styling, keeps font size controls, adds line spacing controls, persists line spacing, and shows current font size and line spacing in the status bar.
+- 2026-08-24: Added continuous chapter boundary navigation and font family selection. Scrolling past the end of a chapter now advances to the next chapter; scrolling upward at the start moves to the previous chapter near its end. The reader now lists installed system fonts with common Chinese fonts prioritized, applies the selected font immediately, and persists the font family.
 
 ## Next Validation Steps
 

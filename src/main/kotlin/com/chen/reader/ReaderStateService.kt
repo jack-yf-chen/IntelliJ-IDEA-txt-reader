@@ -32,5 +32,6 @@ class ReaderState {
     var chapterIndex: Int = 0
     var scrollValue: Int = 0
     var fontSize: Int = 18
+    var fontFamily: String? = null
     var lineSpacingPercent: Int = 20
 }
