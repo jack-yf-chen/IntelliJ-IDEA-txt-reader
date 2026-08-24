@@ -1,0 +1,30 @@
+<idea-plugin>
+    <id>com.chen.reader.novel</id>
+    <name>Novel Reader</name>
+    <vendor>Chen</vendor>
+
+    <description><![CDATA[
+        A lightweight TXT novel reader for IntelliJ IDEA.
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow
+                id="Novel Reader"
+                anchor="right"
+                icon="/icons/reader.svg"
+                factoryClass="com.chen.reader.NovelReaderToolWindowFactory"/>
+    </extensions>
+
+    <actions>
+        <action
+                id="NovelReader.Open"
+                class="com.chen.reader.OpenNovelAction"
+                text="Novel Reader"
+                description="Open a TXT novel in the Novel Reader tool window">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </action>
+    </actions>
+</idea-plugin>
+
