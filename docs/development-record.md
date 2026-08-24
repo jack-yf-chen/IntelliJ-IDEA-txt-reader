@@ -1,34 +1,43 @@
-# Development Record
+# 开发记录
 
-Date: 2026-08-24
+日期：2026-08-24
 
-## Implemented
+## 开发约定
 
-- Created IntelliJ Platform plugin project scaffold.
-- Added Gradle Kotlin DSL configuration targeting IntelliJ IDEA `2026.1.3`.
-- Set Java/Kotlin toolchain target to Java 21.
-- Set plugin compatibility to IntelliJ Platform branch `261`.
-- Added plugin metadata and IntelliJ registrations in `META-INF/plugin.xml`.
-- Added `Tools -> Novel Reader` action.
-- Added right-anchored `Novel Reader` tool window.
-- Added TXT loader with UTF-8, GB18030, and GBK fallback.
-- Added chapter parser for common Chinese chapter headings and `Chapter N`.
-- Added Swing reader panel with:
-  - Open TXT
-  - Previous chapter
-  - Chapter selector
-  - Next chapter
-  - Decrease/increase font size
-  - Status display
-- Added project-level persisted reading state:
-  - Last file path
-  - Charset
-  - Chapter index
-  - Scroll position
-  - Font size
-- Added `.gitignore` and project `README.md`.
+- 后续开发过程中新增的注释和文档统一使用中文。
+- 技术名词、类名、方法名、命令、插件 ID 和外部链接可以保留英文原文。
 
-## Files Added
+## 已实现内容
+
+- 创建 IntelliJ Platform 插件项目骨架。
+- 增加 Gradle Kotlin DSL 配置，目标 IDE 为 IntelliJ IDEA `2026.1.3`。
+- 设置 Java/Kotlin toolchain 为 Java 21。
+- 设置插件兼容分支为 IntelliJ Platform `261`。
+- 在 `META-INF/plugin.xml` 中增加插件元信息和 IntelliJ 注册项。
+- 增加 `Tools -> Novel Reader` 菜单入口。
+- 增加右侧 `Novel Reader` 工具窗口。
+- 增加 TXT 读取器，支持 UTF-8、GB18030、GBK 编码回退。
+- 增加章节解析器，支持常见中文章节标题和 `Chapter N`。
+- 增加 Swing 阅读面板，包含：
+  - 打开 TXT
+  - 上一章
+  - 章节选择
+  - 下一章
+  - 字号减小 / 增大
+  - 行距减小 / 增大
+  - 字体选择
+  - 状态显示
+- 增加项目级阅读状态持久化：
+  - 最后打开文件路径
+  - 编码
+  - 当前章节索引
+  - 滚动位置
+  - 字体
+  - 字号
+  - 行距
+- 增加 `.gitignore` 和项目 `README.md`。
+
+## 新增文件
 
 - `.gitignore`
 - `README.md`
@@ -48,55 +57,64 @@ Date: 2026-08-24
 - `src/main/kotlin/com/chen/reader/TxtBookLoader.kt`
 - `src/main/kotlin/com/chen/reader/model/Book.kt`
 
-## Validation Performed
+## 已执行验证
 
-- Checked repository state before edits: the repository was empty except for `.git`.
-- Checked generated file list with `rg --files`.
-- Checked for leftover markers or stale configuration values with `rg`.
-- Checked that `plugin.xml` contains the expected action and tool window registration.
-- Checked local build tool availability:
-  - `gradle --version` failed because `gradle` is not installed or not on `PATH`.
-  - `kotlinc -version` failed because `kotlinc` is not installed or not on `PATH`.
-  - `GRADLE_HOME` is not set.
-  - No reusable local IntelliJ Platform Gradle Plugin cache was found under the current user Gradle cache.
+- 编辑前检查仓库状态：仓库除 `.git` 外为空。
+- 使用 `rg --files` 检查生成文件清单。
+- 使用 `rg` 检查是否存在遗留标记或旧配置。
+- 检查 `plugin.xml` 中是否包含预期的 Action 和 Tool Window 注册。
+- 检查本机构建工具可用性：
+  - `gradle --version` 失败，原因是 `gradle` 未安装或不在 `PATH` 中。
+  - `kotlinc -version` 失败，原因是 `kotlinc` 未安装或不在 `PATH` 中。
+  - `GRADLE_HOME` 未设置。
+  - 初始检查时，当前用户 Gradle 缓存中没有可复用的 IntelliJ Platform Gradle Plugin 缓存。
+- 使用 IntelliJ IDEA 2026.1.3 自带 JBR 运行 `buildPlugin`，构建成功。
 
-## Validation Not Completed
+## 初始未完成验证
 
-- Gradle compilation was not run.
-- `buildPlugin` was not run.
-- Plugin ZIP was not generated.
-- Manual installation into IntelliJ IDEA 2026.1.3 was not performed.
+- 初始阶段未能运行 Gradle 编译。
+- 初始阶段未能运行 `buildPlugin`。
+- 初始阶段未生成插件 ZIP。
+- 初始阶段未在 IntelliJ IDEA 2026.1.3 中手动安装验证。
 
-## Fixes
+## 修复和迭代记录
 
-- 2026-08-24: Fixed Gradle settings configuration after project import failed with unresolved `intellijPlatform` and `defaultRepositories` in `settings.gradle.kts`. Added the official `org.jetbrains.intellij.platform.settings` plugin and moved IntelliJ Platform plugin version declaration to settings only.
-- 2026-08-24: Removed obsolete IntelliJ Platform dependency helpers after Gradle failed on unresolved `instrumentationTools()`. IntelliJ Platform Gradle Plugin 2.18.1 no longer requires that helper for code instrumentation.
-- 2026-08-24: Fixed Kotlin compilation failure caused by unavailable `UIUtil.getTextAreaBackground()` on the target IntelliJ Platform. Replaced it with Swing `UIManager.getColor("TextArea.background")`.
-- 2026-08-24: Verified `buildPlugin` with IDEA 2026.1.3 bundled JBR as Gradle runtime. Build completed successfully and generated a plugin ZIP under `build/distributions/`.
-- 2026-08-24: Started `runIde` successfully. The sandbox IntelliJ IDEA 2026.1.3 Welcome window opened, the project trust dialog was reached, and the Microsoft Defender exclusion checkbox was cleared before trusting. Further UI verification was stopped when the user pressed Escape to stop Computer Use.
-- 2026-08-24: Fixed toolbar clipping when the Novel Reader tool window is narrow. The action buttons now stay on the first row and the chapter selector fills a second row, preventing the chapter selector and later buttons from being hidden.
-- 2026-08-24: Added reading comfort controls. The reader now uses `JTextPane` with paragraph styling, keeps font size controls, adds line spacing controls, persists line spacing, and shows current font size and line spacing in the status bar.
-- 2026-08-24: Added continuous chapter boundary navigation and font family selection. Scrolling past the end of a chapter now advances to the next chapter; scrolling upward at the start moves to the previous chapter near its end. The reader now lists installed system fonts with common Chinese fonts prioritized, applies the selected font immediately, and persists the font family.
+- 2026-08-24：修复 Gradle settings 配置。项目导入时报错 `settings.gradle.kts` 中 `intellijPlatform` 和 `defaultRepositories` 无法解析，已增加官方 `org.jetbrains.intellij.platform.settings` 插件，并将 IntelliJ Platform 插件版本声明移动到 settings 中。
+- 2026-08-24：移除过期的 IntelliJ Platform 依赖辅助函数。Gradle 报错无法解析 `instrumentationTools()`，IntelliJ Platform Gradle Plugin 2.18.1 不再需要该函数处理代码插桩。
+- 2026-08-24：修复 Kotlin 编译失败。目标 IntelliJ Platform 中没有 `UIUtil.getTextAreaBackground()`，改为使用 Swing `UIManager.getColor("TextArea.background")`。
+- 2026-08-24：使用 IDEA 2026.1.3 自带 JBR 作为 Gradle 运行时验证 `buildPlugin`，构建成功，并在 `build/distributions/` 下生成插件 ZIP。
+- 2026-08-24：成功启动 `runIde`。沙箱 IntelliJ IDEA 2026.1.3 Welcome 窗口已打开，打开项目时到达信任项目弹窗，并在信任前取消 Microsoft Defender 排除列表勾选。后续 UI 验证因用户按下 Escape 停止 Computer Use 而中止。
+- 2026-08-24：修复 `Novel Reader` 工具窗口变窄时顶部工具栏被裁剪的问题。操作按钮保留在第一行，章节选择器独占第二行，避免章节选择器和后续按钮被隐藏。
+- 2026-08-24：增加阅读舒适度控制。阅读区改用 `JTextPane` 和段落样式，保留字号控制，增加行距控制，持久化行距，并在状态栏显示当前字号和行距。
+- 2026-08-24：增加章节边界连续滚动和字体选择。章节末尾继续向下滚动时进入下一章，章节开头继续向上滚动时进入上一章末尾。阅读器列出已安装系统字体，并优先展示常见中文字体，选择后立即应用并持久化。
 
-## Next Validation Steps
+## 后续验证步骤
 
-After Gradle is available, run:
+运行：
 
 ```powershell
 gradle buildPlugin
 ```
 
-Then install the ZIP from:
+或使用项目自带 Gradle Wrapper：
+
+```powershell
+.\gradlew.bat buildPlugin
+```
+
+生成的插件 ZIP 位于：
 
 ```text
 build/distributions/
 ```
 
-Manual smoke test:
+手动冒烟验证：
 
-- Confirm `Tools -> Novel Reader` is visible.
-- Open a UTF-8 TXT file.
-- Open a GBK or GB18030 Chinese TXT file.
-- Confirm chapter detection and navigation.
-- Confirm font size controls.
-- Restart IntelliJ IDEA and confirm reading state restores.
+- 确认 `Tools -> Novel Reader` 可见。
+- 打开 UTF-8 TXT 文件。
+- 打开 GBK 或 GB18030 中文 TXT 文件。
+- 确认章节检测和章节导航正常。
+- 确认章节边界连续滚动切换正常。
+- 确认字号、行距、字体选择正常。
+- 重启 IntelliJ IDEA 后确认阅读状态可以恢复。
+

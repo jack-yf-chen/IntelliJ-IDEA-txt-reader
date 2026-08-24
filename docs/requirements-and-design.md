@@ -1,125 +1,138 @@
-# IntelliJ IDEA Novel Reader Plugin Requirements and Design
+# IntelliJ IDEA 小说阅读插件需求与设计
 
-Date: 2026-08-24
+日期：2026-08-24
 
-## Background
+## 背景
 
-The user is using IntelliJ IDEA 2026.1.3. Existing public marketplace novel reader plugins are not usable because of compatibility issues. This project will provide a dedicated IntelliJ Platform plugin that supports this IDE version.
+用户正在使用 IntelliJ IDEA 2026.1.3。公开插件市场中已有的小说阅读插件因为版本兼容问题无法正常使用，因此本项目开发一个专门兼容该 IDE 版本的 IntelliJ Platform 插件。
 
-JetBrains official compatibility notes identify IntelliJ Platform 2026.1 as branch `261`, with Java 21 as the required runtime level. The implementation therefore targets IntelliJ Platform `2026.1.3`, uses `sinceBuild = "261"`, and keeps `untilBuild` open for later compatibility unless verification shows a reason to restrict it.
+根据 JetBrains 官方兼容性说明，IntelliJ Platform 2026.1 对应构建分支 `261`，运行时要求 Java 21。因此本插件第一版目标平台为 IntelliJ IDEA `2026.1.3`，插件兼容范围设置为 `sinceBuild = "261"`，暂不设置 `untilBuild`，后续如验证需要再收紧兼容范围。
 
-References checked on 2026-08-24:
+2026-08-24 已查阅的参考资料：
 
-- IntelliJ Platform build number ranges: https://plugins.jetbrains.com/docs/intellij/build-number-ranges.html
-- IntelliJ Platform Gradle Plugin 2.x: https://plugins.jetbrains.com/docs/intellij/tools-intellij-platform-gradle-plugin.html
-- IntelliJ Platform Gradle Plugin extension: https://plugins.jetbrains.com/docs/intellij/tools-intellij-platform-gradle-plugin-extension.html
+- IntelliJ Platform 构建号范围：https://plugins.jetbrains.com/docs/intellij/build-number-ranges.html
+- IntelliJ Platform Gradle Plugin 2.x：https://plugins.jetbrains.com/docs/intellij/tools-intellij-platform-gradle-plugin.html
+- IntelliJ Platform Gradle Plugin 扩展配置：https://plugins.jetbrains.com/docs/intellij/tools-intellij-platform-gradle-plugin-extension.html
 
-## Version 1 Scope
+## 第一版范围
 
-Version 1 focuses on TXT reading only.
+第一版只聚焦 TXT 小说阅读。
 
-Required features:
+必须支持：
 
-- Installable IntelliJ Platform plugin for IntelliJ IDEA 2026.1.3.
-- Open plugin from the `Tools` menu.
-- Provide a `Novel Reader` tool window, initially anchored on the right side.
-- Open local `.txt` files.
-- Display Chinese TXT content correctly where possible.
-- Detect chapters from common TXT headings.
-- Navigate previous and next chapters.
-- Jump to a chapter from a chapter selector.
-- Increase and decrease reading font size.
-- Save and restore basic reading state.
+- 可安装到 IntelliJ IDEA 2026.1.3 的 IntelliJ Platform 插件。
+- 可从 `Tools` 菜单打开插件。
+- 提供 `Novel Reader` 工具窗口，默认锚定在右侧。
+- 打开本地 `.txt` 文件。
+- 尽量正确显示中文 TXT 内容。
+- 根据常见 TXT 章节标题识别章节。
+- 支持上一章 / 下一章导航。
+- 支持从章节选择框跳转章节。
+- 支持字号调整。
+- 支持行距调整。
+- 支持系统字体选择，例如微软雅黑、宋体、仿宋、楷体、黑体等。
+- 支持章节边界连续滚动切换。
+- 支持保存并恢复基础阅读状态。
 
-Out of scope for Version 1:
+第一版暂不支持：
 
-- EPUB, PDF, MOBI, or online book sources.
-- Bookshelf management.
-- Cloud sync.
-- Marketplace publishing automation.
-- Complex themes and typography presets.
+- EPUB、PDF、MOBI 或在线书源。
+- 书架管理。
+- 云同步。
+- 插件市场发布自动化。
+- 复杂主题和排版预设。
 
-## UX Design
+## 交互设计
 
-The plugin surface is a tool window named `Novel Reader`.
+插件主界面是一个名为 `Novel Reader` 的工具窗口。
 
-Toolbar controls:
+顶部控件：
 
-- Open TXT file.
-- Previous chapter.
-- Chapter selector.
-- Next chapter.
-- Decrease font size.
-- Increase font size.
+- 打开 TXT 文件。
+- 上一章。
+- 下一章。
+- 字号减小。
+- 字号增大。
+- 行距减小。
+- 行距增大。
+- 字体选择。
+- 章节选择。
 
-Main reading area:
+正文区域：
 
-- Scrollable plain text reading view.
-- Line wrap enabled.
-- Default font size suitable for reading inside an IDE panel.
+- 可滚动的纯文本阅读区域。
+- 自动换行。
+- 支持字号、行距、字体样式调整。
+- 滚动到章节末尾后继续向下滚动，自动进入下一章。
+- 滚动到章节开头后继续向上滚动，自动进入上一章末尾。
 
-Status area:
+状态区域：
 
-- Current file name.
-- Current chapter number and total chapter count.
-- Current encoding.
+- 当前文件名。
+- 当前章节序号和总章节数。
+- 当前字体。
+- 当前字号。
+- 当前行距。
+- 当前编码。
 
-## Technical Design
+## 技术设计
 
-Language and build:
+语言和构建：
 
 - Kotlin
 - Gradle Kotlin DSL
 - IntelliJ Platform Gradle Plugin 2.x
 - Java toolchain 21
 
-Main components:
+主要组件：
 
-- `OpenNovelAction`: action registered under `ToolsMenu`; opens a TXT file chooser and activates the tool window.
-- `NovelReaderToolWindowFactory`: creates the tool window and installs the reader panel.
-- `ReaderPanel`: Swing UI for reading, navigation, font controls, and state persistence.
-- `TxtBookLoader`: TXT loader with charset fallback.
-- `ChapterParser`: simple chapter parser based on common Chinese and English chapter headings.
-- `ReaderStateService`: project-level persistent state for last file, charset, chapter index, scroll position, and font size.
+- `OpenNovelAction`：注册到 `ToolsMenu`，打开 TXT 文件选择器并激活工具窗口。
+- `NovelReaderToolWindowFactory`：创建工具窗口并安装阅读面板。
+- `ReaderPanel`：基于 Swing 的阅读 UI，负责文件打开、章节导航、阅读样式控制和状态保存。
+- `TxtBookLoader`：TXT 文件读取器，支持编码回退。
+- `ChapterParser`：基于常见中英文章节标题的简单章节解析器。
+- `ReaderStateService`：项目级持久化状态，保存最后打开文件、编码、章节索引、滚动位置、字体、字号和行距。
 
-TXT encoding strategy:
+TXT 编码策略：
 
-1. Try UTF-8.
-2. Try GB18030.
-3. Try GBK.
-4. Report a readable error if all attempts fail.
+1. 尝试 UTF-8。
+2. 尝试 GB18030。
+3. 尝试 GBK。
+4. 全部失败时提示可读错误。
 
-Chapter parsing strategy:
+章节解析策略：
 
-- Match common chapter lines such as:
+- 匹配常见章节行，例如：
   - `第1章`
   - `第一章`
   - `第001回`
   - `Chapter 1`
-- If no chapters are found, treat the whole file as one chapter.
+- 如果没有识别到章节，将全文作为单章处理。
 
-## Validation Plan
+## 验证计划
 
-Minimum local validation:
+最低本地验证：
 
-- Compile Kotlin sources.
-- Run Gradle plugin structure verification if dependencies are available.
-- Build plugin ZIP with `buildPlugin`.
+- 编译 Kotlin 源码。
+- 运行 Gradle 插件结构校验。
+- 使用 `buildPlugin` 构建插件 ZIP。
 
-Manual validation in IntelliJ IDEA 2026.1.3:
+在 IntelliJ IDEA 2026.1.3 中手动验证：
 
-- Install generated ZIP plugin.
-- Confirm `Tools -> Novel Reader` exists.
-- Open a UTF-8 TXT file.
-- Open a GBK/GB18030 Chinese TXT file.
-- Confirm text rendering, chapter navigation, font adjustment, and persisted state.
+- 安装生成的 ZIP 插件。
+- 确认 `Tools -> Novel Reader` 可见。
+- 打开 UTF-8 TXT 文件。
+- 打开 GBK 或 GB18030 中文 TXT 文件。
+- 确认文本显示、章节识别、章节跳转、连续滚动切章、字号调整、行距调整、字体选择和状态恢复正常。
 
-## Development Log
+## 开发日志
 
-- 2026-08-24: Requirements and design document created before implementation.
-- 2026-08-24: Project scaffold created with Kotlin, Gradle Kotlin DSL, IntelliJ Platform Gradle Plugin `2.18.1`, and IntelliJ IDEA `2026.1.3` as the target platform.
-- 2026-08-24: Implemented TXT loading with UTF-8, GB18030, and GBK fallback.
-- 2026-08-24: Implemented simple chapter parsing for common Chinese headings and `Chapter N` headings.
-- 2026-08-24: Implemented `Tools -> Novel Reader` action and right-anchored `Novel Reader` tool window.
-- 2026-08-24: Implemented reader panel with file opening, chapter selector, previous/next chapter controls, font size controls, and project-level persisted reading state.
-- 2026-08-24: Local build could not be completed because `gradle` and `kotlinc` are not installed or not available on `PATH`; detailed validation notes are recorded in `docs/development-record.md`.
+- 2026-08-24：实现前创建需求与设计文档。
+- 2026-08-24：创建 Kotlin、Gradle Kotlin DSL、IntelliJ Platform Gradle Plugin `2.18.1`、IntelliJ IDEA `2026.1.3` 目标平台的项目骨架。
+- 2026-08-24：实现 TXT 读取，支持 UTF-8、GB18030、GBK 编码回退。
+- 2026-08-24：实现常见中文章节标题和 `Chapter N` 标题的简单章节解析。
+- 2026-08-24：实现 `Tools -> Novel Reader` 菜单入口和右侧 `Novel Reader` 工具窗口。
+- 2026-08-24：实现阅读面板，支持文件打开、章节选择、上一章 / 下一章、字号控制和项目级阅读状态持久化。
+- 2026-08-24：最初因本机命令行没有安装或未配置 `gradle` 和 `kotlinc`，未能完成本地构建；详细验证记录见 `docs/development-record.md`。
+- 2026-08-24：明确约定后续开发过程中新增的注释和文档使用中文。
+
