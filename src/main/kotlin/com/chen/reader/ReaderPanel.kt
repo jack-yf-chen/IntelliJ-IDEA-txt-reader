@@ -441,11 +441,20 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
                 action()
             }
         }
-        listOf(this, textPane).forEach { component ->
-            val inputMap = component.getInputMap(JComponent.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT)
-            inputMap.put(keyStroke, name)
-            component.actionMap.put(name, readerAction)
-        }
+        bindShortcutTo(this, JComponent.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT, name, keyStroke, readerAction)
+        bindShortcutTo(textPane, JComponent.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT, name, keyStroke, readerAction)
+        bindShortcutTo(textPane, JComponent.WHEN_FOCUSED, name, keyStroke, readerAction)
+    }
+
+    private fun bindShortcutTo(
+        component: JComponent,
+        condition: Int,
+        name: String,
+        keyStroke: KeyStroke,
+        action: AbstractAction,
+    ) {
+        component.getInputMap(condition).put(keyStroke, name)
+        component.actionMap.put(name, action)
     }
 
     private fun scrollLines(direction: Int) {
