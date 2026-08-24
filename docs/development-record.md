@@ -70,6 +70,7 @@ Date: 2026-08-24
 ## Fixes
 
 - 2026-08-24: Fixed Gradle settings configuration after project import failed with unresolved `intellijPlatform` and `defaultRepositories` in `settings.gradle.kts`. Added the official `org.jetbrains.intellij.platform.settings` plugin and moved IntelliJ Platform plugin version declaration to settings only.
+- 2026-08-24: Removed obsolete IntelliJ Platform dependency helpers after Gradle failed on unresolved `instrumentationTools()`. IntelliJ Platform Gradle Plugin 2.18.1 no longer requires that helper for code instrumentation.
 
 ## Next Validation Steps
 

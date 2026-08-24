@@ -14,9 +14,6 @@ kotlin {
 dependencies {
     intellijPlatform {
         intellijIdea("2026.1.3")
-        instrumentationTools()
-        pluginVerifier()
-        zipSigner()
     }
 }
 
