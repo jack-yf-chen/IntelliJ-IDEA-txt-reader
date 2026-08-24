@@ -1,11 +1,14 @@
+import org.jetbrains.intellij.platform.gradle.extensions.intellijPlatform
+
 pluginManagement {
     repositories {
         mavenCentral()
         gradlePluginPortal()
-        intellijPlatform {
-            defaultRepositories()
-        }
     }
+}
+
+plugins {
+    id("org.jetbrains.intellij.platform.settings") version "2.18.1"
 }
 
 dependencyResolutionManagement {
@@ -19,4 +22,3 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "intellij-idea-novel-reader"
-

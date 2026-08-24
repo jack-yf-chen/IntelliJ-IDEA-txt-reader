@@ -67,6 +67,10 @@ Date: 2026-08-24
 - Plugin ZIP was not generated.
 - Manual installation into IntelliJ IDEA 2026.1.3 was not performed.
 
+## Fixes
+
+- 2026-08-24: Fixed Gradle settings configuration after project import failed with unresolved `intellijPlatform` and `defaultRepositories` in `settings.gradle.kts`. Added the official `org.jetbrains.intellij.platform.settings` plugin and moved IntelliJ Platform plugin version declaration to settings only.
+
 ## Next Validation Steps
 
 After Gradle is available, run:
@@ -89,4 +93,3 @@ Manual smoke test:
 - Confirm chapter detection and navigation.
 - Confirm font size controls.
 - Restart IntelliJ IDEA and confirm reading state restores.
-
