@@ -41,6 +41,7 @@ import javax.swing.JTextPane
 import javax.swing.KeyStroke
 import javax.swing.SwingUtilities
 import javax.swing.UIManager
+import javax.swing.text.DefaultCaret
 import javax.swing.text.SimpleAttributeSet
 import javax.swing.text.StyleConstants
 import java.util.WeakHashMap
@@ -88,6 +89,8 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         hideCursorCheckBox.isSelected = stateService.state.hideCursor
 
         textPane.isEditable = false
+        textPane.isFocusable = true
+        textPane.caret = InvisibleCaret()
         textPane.margin = JBUI.insets(14)
         textPane.border = BorderFactory.createEmptyBorder()
         updateReaderStyle()
@@ -111,29 +114,34 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             if (!updatingFontSelector) {
                 stateService.state.fontFamily = fontSelector.selectedItem as? String
                 updateReaderStyle()
+                focusReader()
             }
         }
         textColorSelector.addActionListener {
             if (!updatingTextColorSelector) {
                 stateService.state.textColorName = textColorSelector.selectedItem as String
                 updateReaderStyle()
+                focusReader()
             }
         }
         themeSelector.addActionListener {
             if (!updatingThemeSelector) {
                 stateService.state.themeName = themeSelector.selectedItem as String
                 updateReaderStyle()
+                focusReader()
             }
         }
         widthSelector.addActionListener {
             if (!updatingWidthSelector) {
                 stateService.state.widthMode = widthSelector.selectedItem as String
                 updateReaderInsets()
+                focusReader()
             }
         }
         hideCursorCheckBox.addActionListener {
             stateService.state.hideCursor = hideCursorCheckBox.isSelected
             updateCursorMode()
+            focusReader()
         }
         chapterSelector.addActionListener {
             if (!updatingChapterSelector) {
@@ -343,7 +351,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             lastScrollValue = scrollValue
             stateService.state.scrollValue = scrollValue
             suppressBoundaryNavigation = false
-            textPane.requestFocusInWindow()
+            focusReader()
             updateStatus()
         }
 
@@ -413,6 +421,8 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     }
 
     private fun installKeyboardShortcuts() {
+        bindShortcut("向下滚动", KeyStroke.getKeyStroke(KeyEvent.VK_DOWN, 0)) { scrollLines(1) }
+        bindShortcut("向上滚动", KeyStroke.getKeyStroke(KeyEvent.VK_UP, 0)) { scrollLines(-1) }
         bindShortcut("向下翻页", KeyStroke.getKeyStroke(KeyEvent.VK_SPACE, 0)) { scrollPage(1) }
         bindShortcut("向上翻页", KeyStroke.getKeyStroke(KeyEvent.VK_SPACE, InputEvent.SHIFT_DOWN_MASK)) { scrollPage(-1) }
         bindShortcut("PageDown", KeyStroke.getKeyStroke(KeyEvent.VK_PAGE_DOWN, 0)) { scrollPage(1) }
@@ -426,25 +436,58 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     }
 
     private fun bindShortcut(name: String, keyStroke: KeyStroke, action: () -> Unit) {
-        val inputMap = textPane.getInputMap(JComponent.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT)
-        inputMap.put(keyStroke, name)
-        textPane.actionMap.put(name, object : AbstractAction() {
+        val readerAction = object : AbstractAction() {
             override fun actionPerformed(event: java.awt.event.ActionEvent?) {
                 action()
             }
-        })
+        }
+        listOf(this, textPane).forEach { component ->
+            val inputMap = component.getInputMap(JComponent.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT)
+            inputMap.put(keyStroke, name)
+            component.actionMap.put(name, readerAction)
+        }
+    }
+
+    private fun scrollLines(direction: Int) {
+        val lineStep = (textPane.getFontMetrics(textPane.font).height * 3).coerceAtLeast(JBUI.scale(36))
+        scrollBy(lineStep * direction)
     }
 
     private fun scrollPage(direction: Int) {
         val scrollBar = scrollPane.verticalScrollBar
         val delta = (scrollBar.visibleAmount * 0.86).toInt().coerceAtLeast(JBUI.scale(80))
-        val nextValue = (scrollBar.value + delta * direction).coerceIn(
+        scrollBy(delta * direction)
+    }
+
+    private fun scrollBy(delta: Int) {
+        val book = currentBook ?: return
+        val scrollBar = scrollPane.verticalScrollBar
+        val maxScrollValue = (scrollBar.maximum - scrollBar.visibleAmount).coerceAtLeast(0)
+        val currentValue = scrollBar.value
+        val nextValue = (currentValue + delta).coerceIn(
             0,
-            (scrollBar.maximum - scrollBar.visibleAmount).coerceAtLeast(0),
+            maxScrollValue,
         )
+        val index = stateService.state.chapterIndex
+
+        if (nextValue == currentValue && !suppressBoundaryNavigation) {
+            when {
+                delta > 0 && index < book.chapters.lastIndex -> renderChapter(index + 1, restoreScroll = false)
+                delta < 0 && index > 0 -> renderChapter(index - 1, restoreScroll = false, scrollToBottom = true)
+            }
+            return
+        }
+
         scrollBar.value = nextValue
         stateService.state.scrollValue = nextValue
+        lastScrollValue = nextValue
         updateStatus()
+    }
+
+    private fun focusReader() {
+        SwingUtilities.invokeLater {
+            textPane.requestFocusInWindow()
+        }
     }
 
     private fun handleBoundaryWheel(event: MouseWheelEvent) {
@@ -738,6 +781,16 @@ private class ReaderButtonIcon(private val kind: ButtonIconKind) : Icon {
 
 private class ReaderTextPane : JTextPane() {
     override fun getScrollableTracksViewportWidth(): Boolean = true
+}
+
+private class InvisibleCaret : DefaultCaret() {
+    override fun paint(graphics: Graphics?) = Unit
+
+    override fun setVisible(visible: Boolean) {
+        super.setVisible(false)
+    }
+
+    override fun isVisible(): Boolean = false
 }
 
 private fun createHiddenCursor(): Cursor {
