@@ -7,6 +7,7 @@ import com.intellij.openapi.ui.Messages
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.util.ui.JBUI
 import java.awt.BorderLayout
+import java.awt.Dimension
 import java.awt.FlowLayout
 import java.awt.Font
 import java.nio.file.Files
@@ -46,15 +47,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         textArea.border = BorderFactory.createEmptyBorder()
         updateReaderFont()
 
-        val toolbar = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0))
-        toolbar.add(openButton)
-        toolbar.add(previousButton)
-        toolbar.add(chapterSelector)
-        toolbar.add(nextButton)
-        toolbar.add(smallerButton)
-        toolbar.add(largerButton)
-
-        add(toolbar, BorderLayout.NORTH)
+        add(createToolbar(), BorderLayout.NORTH)
         add(scrollPane, BorderLayout.CENTER)
         add(statusLabel, BorderLayout.SOUTH)
 
@@ -76,6 +69,22 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         }
 
         updateControls()
+    }
+
+    private fun createToolbar(): JPanel {
+        val toolbar = JPanel(BorderLayout(0, JBUI.scale(6)))
+        val buttonsPanel = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(6), 0))
+        buttonsPanel.add(openButton)
+        buttonsPanel.add(previousButton)
+        buttonsPanel.add(nextButton)
+        buttonsPanel.add(smallerButton)
+        buttonsPanel.add(largerButton)
+
+        chapterSelector.minimumSize = Dimension(0, chapterSelector.preferredSize.height)
+
+        toolbar.add(buttonsPanel, BorderLayout.NORTH)
+        toolbar.add(chapterSelector, BorderLayout.CENTER)
+        return toolbar
     }
 
     fun restoreLastBook() {
