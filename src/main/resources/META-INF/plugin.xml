@@ -4,7 +4,7 @@
     <vendor>Chen</vendor>
 
     <description><![CDATA[
-        A lightweight TXT novel reader for IntelliJ IDEA.
+        一个用于在 IntelliJ IDEA 内阅读本地 TXT 小说的轻量级插件。
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
@@ -18,13 +18,25 @@
     </extensions>
 
     <actions>
+        <group
+                id="NovelReader.Menu"
+                text="Novel Reader"
+                popup="true">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </group>
         <action
                 id="NovelReader.Open"
                 class="com.chen.reader.OpenNovelAction"
-                text="Novel Reader"
-                description="Open a TXT novel in the Novel Reader tool window">
-            <add-to-group group-id="ToolsMenu" anchor="last"/>
+                text="打开阅读器"
+                description="在 Novel Reader 工具窗口中打开 TXT 小说">
+            <add-to-group group-id="NovelReader.Menu" anchor="first"/>
+        </action>
+        <action
+                id="NovelReader.ToggleButtonStyle"
+                class="com.chen.reader.ToggleButtonStyleAction"
+                text="切换为图标按钮"
+                description="在文字按钮和图标按钮之间切换 Novel Reader 工具栏显示方式">
+            <add-to-group group-id="NovelReader.Menu" anchor="last"/>
         </action>
     </actions>
 </idea-plugin>
-

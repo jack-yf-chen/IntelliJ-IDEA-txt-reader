@@ -12,8 +12,11 @@ import java.awt.Cursor
 import java.awt.Dimension
 import java.awt.FlowLayout
 import java.awt.Font
+import java.awt.Graphics
+import java.awt.Graphics2D
 import java.awt.GraphicsEnvironment
 import java.awt.Point
+import java.awt.RenderingHints
 import java.awt.Toolkit
 import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
@@ -29,6 +32,7 @@ import javax.swing.JButton
 import javax.swing.JCheckBox
 import javax.swing.JComboBox
 import javax.swing.JComponent
+import javax.swing.Icon
 import javax.swing.JLabel
 import javax.swing.JPanel
 import javax.swing.JTextPane
@@ -37,6 +41,7 @@ import javax.swing.SwingUtilities
 import javax.swing.UIManager
 import javax.swing.text.SimpleAttributeSet
 import javax.swing.text.StyleConstants
+import java.util.WeakHashMap
 
 class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     private val stateService = ReaderStateService.getInstance(project)
@@ -50,6 +55,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     private val settingsButton = JButton("设置")
     private val chapterSelector = JComboBox<Chapter>()
     private val fontSelector = JComboBox(loadFontFamilies().toTypedArray())
+    private val textColorSelector = JComboBox(textColors.keys.toTypedArray())
     private val themeSelector = JComboBox(readerThemes.map { it.name }.toTypedArray())
     private val widthSelector = JComboBox(widthModes.keys.toTypedArray())
     private val hideCursorCheckBox = JCheckBox("隐藏光标")
@@ -62,6 +68,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     private var currentBook: Book? = null
     private var updatingChapterSelector = false
     private var updatingFontSelector = false
+    private var updatingTextColorSelector = false
     private var updatingThemeSelector = false
     private var updatingWidthSelector = false
     private var suppressBoundaryNavigation = false
@@ -70,7 +77,9 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
 
     init {
         border = JBUI.Borders.empty(8)
+        registerPanel(project, this)
         initializeFontSelector()
+        initializeTextColorSelector()
         initializeThemeSelector()
         initializeWidthSelector()
         hideCursorCheckBox.isSelected = stateService.state.hideCursor
@@ -85,6 +94,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         add(createToolbar(), BorderLayout.NORTH)
         add(scrollPane, BorderLayout.CENTER)
         add(statusLabel, BorderLayout.SOUTH)
+        updateButtonStyle()
 
         openButton.addActionListener { NovelReaderOpener.openFromFileChooser(project) }
         previousButton.addActionListener { moveChapter(-1) }
@@ -97,6 +107,12 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         fontSelector.addActionListener {
             if (!updatingFontSelector) {
                 stateService.state.fontFamily = fontSelector.selectedItem as? String
+                updateReaderStyle()
+            }
+        }
+        textColorSelector.addActionListener {
+            if (!updatingTextColorSelector) {
+                stateService.state.textColorName = textColorSelector.selectedItem as String
                 updateReaderStyle()
             }
         }
@@ -159,6 +175,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         settingsPanel.add(tighterLineButton)
         settingsPanel.add(looserLineButton)
         settingsPanel.add(fontSelector)
+        settingsPanel.add(textColorSelector)
         settingsPanel.add(themeSelector)
         settingsPanel.add(widthSelector)
         settingsPanel.add(hideCursorCheckBox)
@@ -168,6 +185,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         chapterSelector.minimumSize = Dimension(0, chapterSelector.preferredSize.height)
         fontSelector.minimumSize = Dimension(JBUI.scale(120), fontSelector.preferredSize.height)
         fontSelector.preferredSize = Dimension(JBUI.scale(150), fontSelector.preferredSize.height)
+        textColorSelector.preferredSize = Dimension(JBUI.scale(100), textColorSelector.preferredSize.height)
         themeSelector.preferredSize = Dimension(JBUI.scale(100), themeSelector.preferredSize.height)
         widthSelector.preferredSize = Dimension(JBUI.scale(80), widthSelector.preferredSize.height)
 
@@ -176,10 +194,15 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         return toolbar
     }
 
+    override fun removeNotify() {
+        unregisterPanel(project, this)
+        super.removeNotify()
+    }
+
     private fun toggleSettingsPanel() {
         settingsVisible = !settingsVisible
-        settingsButton.text = if (settingsVisible) "收起" else "设置"
         findSettingsPanel()?.isVisible = settingsVisible
+        updateButtonStyle()
         revalidate()
         repaint()
     }
@@ -196,6 +219,15 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             fontSelector.selectedItem = preferredFont
             updatingFontSelector = false
             stateService.state.fontFamily = preferredFont
+        }
+    }
+
+    private fun initializeTextColorSelector() {
+        val colorName = stateService.state.textColorName
+        if (textColorSelector.getIndexOf(colorName) >= 0) {
+            updatingTextColorSelector = true
+            textColorSelector.selectedItem = colorName
+            updatingTextColorSelector = false
         }
     }
 
@@ -326,7 +358,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     private fun applyTheme() {
         val theme = selectedTheme()
         val background = theme.background ?: UIManager.getColor("TextArea.background")
-        val foreground = theme.foreground ?: UIManager.getColor("TextArea.foreground")
+        val foreground = selectedTextColor() ?: theme.foreground ?: UIManager.getColor("TextArea.foreground")
         textPane.background = background
         textPane.foreground = foreground
         textPane.caretColor = foreground
@@ -461,6 +493,39 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         return readerThemes.firstOrNull { it.name == stateService.state.themeName } ?: readerThemes.first()
     }
 
+    private fun selectedTextColor(): Color? = textColors[stateService.state.textColorName]
+
+    fun updateButtonStyle() {
+        val useIcons = stateService.state.buttonStyle == BUTTON_STYLE_ICON
+        configureButton(openButton, "打开", ReaderButtonIcon(ButtonIconKind.OPEN), "打开 TXT 文件", useIcons)
+        configureButton(previousButton, "上一章", ReaderButtonIcon(ButtonIconKind.PREVIOUS), "上一章", useIcons)
+        configureButton(nextButton, "下一章", ReaderButtonIcon(ButtonIconKind.NEXT), "下一章", useIcons)
+        configureButton(smallerButton, "A-", ReaderButtonIcon(ButtonIconKind.FONT_SMALLER), "减小字号", useIcons)
+        configureButton(largerButton, "A+", ReaderButtonIcon(ButtonIconKind.FONT_LARGER), "增大字号", useIcons)
+        configureButton(tighterLineButton, "行距-", ReaderButtonIcon(ButtonIconKind.LINE_TIGHTER), "减小行距", useIcons)
+        configureButton(looserLineButton, "行距+", ReaderButtonIcon(ButtonIconKind.LINE_LOOSER), "增大行距", useIcons)
+        configureButton(settingsButton, if (settingsVisible) "收起" else "设置", ReaderButtonIcon(ButtonIconKind.SETTINGS), "显示或隐藏阅读设置", useIcons)
+        revalidate()
+        repaint()
+    }
+
+    private fun configureButton(
+        button: JButton,
+        text: String,
+        icon: Icon,
+        tooltip: String,
+        useIcons: Boolean,
+    ) {
+        button.toolTipText = tooltip
+        button.text = if (useIcons) null else text
+        button.icon = if (useIcons) icon else null
+        button.preferredSize = if (useIcons) {
+            Dimension(JBUI.scale(34), button.preferredSize.height)
+        } else {
+            null
+        }
+    }
+
     private fun JComboBox<String>.getIndexOf(value: String): Int {
         for (index in 0 until itemCount) {
             if (getItemAt(index) == value) {
@@ -499,6 +564,15 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             ReaderTheme("暗色", Color(0x1F2329), Color(0xD6D6D6)),
         )
 
+        private val textColors = linkedMapOf<String, Color?>(
+            "跟随主题" to null,
+            "柔白" to Color(0xF2F2F2),
+            "墨黑" to Color(0x202124),
+            "暖棕" to Color(0x4B3828),
+            "护眼绿" to Color(0x31452D),
+            "淡灰" to Color(0xC9CDD4),
+        )
+
         private val preferredFontFamilies = listOf(
             "Microsoft YaHei",
             "Microsoft YaHei UI",
@@ -513,6 +587,24 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         )
 
         private const val SETTINGS_PANEL_NAME = "reader-settings-panel"
+        private const val BUTTON_STYLE_TEXT = "文字"
+        private const val BUTTON_STYLE_ICON = "图标"
+        private val panelsByProject = WeakHashMap<Project, MutableSet<ReaderPanel>>()
+
+        private fun registerPanel(project: Project, panel: ReaderPanel) {
+            panelsByProject.getOrPut(project) { mutableSetOf() }.add(panel)
+        }
+
+        private fun unregisterPanel(project: Project, panel: ReaderPanel) {
+            panelsByProject[project]?.remove(panel)
+        }
+
+        fun toggleButtonStyle(project: Project): String {
+            val state = ReaderStateService.getInstance(project).state
+            state.buttonStyle = if (state.buttonStyle == BUTTON_STYLE_ICON) BUTTON_STYLE_TEXT else BUTTON_STYLE_ICON
+            panelsByProject[project]?.forEach { it.updateButtonStyle() }
+            return state.buttonStyle
+        }
     }
 }
 
@@ -521,6 +613,85 @@ private data class ReaderTheme(
     val background: Color?,
     val foreground: Color?,
 )
+
+private enum class ButtonIconKind {
+    OPEN,
+    PREVIOUS,
+    NEXT,
+    FONT_SMALLER,
+    FONT_LARGER,
+    LINE_TIGHTER,
+    LINE_LOOSER,
+    SETTINGS,
+}
+
+private class ReaderButtonIcon(private val kind: ButtonIconKind) : Icon {
+    override fun getIconWidth(): Int = JBUI.scale(16)
+
+    override fun getIconHeight(): Int = JBUI.scale(16)
+
+    override fun paintIcon(component: java.awt.Component?, graphics: Graphics?, x: Int, y: Int) {
+        if (graphics == null) {
+            return
+        }
+
+        val g = graphics.create() as Graphics2D
+        try {
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+            g.color = component?.foreground ?: UIManager.getColor("Button.foreground")
+            when (kind) {
+                ButtonIconKind.OPEN -> paintOpen(g, x, y)
+                ButtonIconKind.PREVIOUS -> paintArrow(g, x, y, left = true)
+                ButtonIconKind.NEXT -> paintArrow(g, x, y, left = false)
+                ButtonIconKind.FONT_SMALLER -> paintText(g, x, y, "A-")
+                ButtonIconKind.FONT_LARGER -> paintText(g, x, y, "A+")
+                ButtonIconKind.LINE_TIGHTER -> paintLines(g, x, y, tight = true)
+                ButtonIconKind.LINE_LOOSER -> paintLines(g, x, y, tight = false)
+                ButtonIconKind.SETTINGS -> paintText(g, x, y, "...")
+            }
+        } finally {
+            g.dispose()
+        }
+    }
+
+    private fun paintOpen(g: Graphics2D, x: Int, y: Int) {
+        val s = JBUI.scale(16)
+        g.drawRect(x + JBUI.scale(2), y + JBUI.scale(5), s - JBUI.scale(4), s - JBUI.scale(7))
+        g.drawLine(x + JBUI.scale(3), y + JBUI.scale(5), x + JBUI.scale(6), y + JBUI.scale(2))
+        g.drawLine(x + JBUI.scale(6), y + JBUI.scale(2), x + JBUI.scale(10), y + JBUI.scale(2))
+    }
+
+    private fun paintArrow(g: Graphics2D, x: Int, y: Int, left: Boolean) {
+        val midY = y + JBUI.scale(8)
+        val startX = if (left) x + JBUI.scale(11) else x + JBUI.scale(5)
+        val endX = if (left) x + JBUI.scale(5) else x + JBUI.scale(11)
+        g.drawLine(startX, midY, endX, midY)
+        if (left) {
+            g.drawLine(endX, midY, endX + JBUI.scale(4), midY - JBUI.scale(4))
+            g.drawLine(endX, midY, endX + JBUI.scale(4), midY + JBUI.scale(4))
+        } else {
+            g.drawLine(endX, midY, endX - JBUI.scale(4), midY - JBUI.scale(4))
+            g.drawLine(endX, midY, endX - JBUI.scale(4), midY + JBUI.scale(4))
+        }
+    }
+
+    private fun paintLines(g: Graphics2D, x: Int, y: Int, tight: Boolean) {
+        val gap = JBUI.scale(if (tight) 3 else 5)
+        val startY = y + JBUI.scale(if (tight) 5 else 3)
+        for (index in 0..2) {
+            val lineY = startY + gap * index
+            g.drawLine(x + JBUI.scale(3), lineY, x + JBUI.scale(13), lineY)
+        }
+    }
+
+    private fun paintText(g: Graphics2D, x: Int, y: Int, text: String) {
+        g.font = g.font.deriveFont(Font.BOLD, JBUI.scale(10).toFloat())
+        val metrics = g.fontMetrics
+        val textX = x + ((iconWidth - metrics.stringWidth(text)) / 2)
+        val textY = y + ((iconHeight - metrics.height) / 2) + metrics.ascent
+        g.drawString(text, textX, textY)
+    }
+}
 
 private class ReaderTextPane : JTextPane() {
     override fun getScrollableTracksViewportWidth(): Boolean = true
