@@ -71,6 +71,9 @@ Date: 2026-08-24
 
 - 2026-08-24: Fixed Gradle settings configuration after project import failed with unresolved `intellijPlatform` and `defaultRepositories` in `settings.gradle.kts`. Added the official `org.jetbrains.intellij.platform.settings` plugin and moved IntelliJ Platform plugin version declaration to settings only.
 - 2026-08-24: Removed obsolete IntelliJ Platform dependency helpers after Gradle failed on unresolved `instrumentationTools()`. IntelliJ Platform Gradle Plugin 2.18.1 no longer requires that helper for code instrumentation.
+- 2026-08-24: Fixed Kotlin compilation failure caused by unavailable `UIUtil.getTextAreaBackground()` on the target IntelliJ Platform. Replaced it with Swing `UIManager.getColor("TextArea.background")`.
+- 2026-08-24: Verified `buildPlugin` with IDEA 2026.1.3 bundled JBR as Gradle runtime. Build completed successfully and generated a plugin ZIP under `build/distributions/`.
+- 2026-08-24: Started `runIde` successfully. The sandbox IntelliJ IDEA 2026.1.3 Welcome window opened, the project trust dialog was reached, and the Microsoft Defender exclusion checkbox was cleared before trusting. Further UI verification was stopped when the user pressed Escape to stop Computer Use.
 
 ## Next Validation Steps
 

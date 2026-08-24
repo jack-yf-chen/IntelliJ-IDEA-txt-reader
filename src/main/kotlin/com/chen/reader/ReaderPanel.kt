@@ -6,7 +6,6 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.util.ui.JBUI
-import com.intellij.util.ui.UIUtil
 import java.awt.BorderLayout
 import java.awt.FlowLayout
 import java.awt.Font
@@ -19,6 +18,7 @@ import javax.swing.JLabel
 import javax.swing.JPanel
 import javax.swing.JTextArea
 import javax.swing.SwingUtilities
+import javax.swing.UIManager
 
 class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     private val stateService = ReaderStateService.getInstance(project)
@@ -42,7 +42,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         textArea.lineWrap = true
         textArea.wrapStyleWord = true
         textArea.margin = JBUI.insets(14)
-        textArea.background = UIUtil.getTextAreaBackground()
+        textArea.background = UIManager.getColor("TextArea.background")
         textArea.border = BorderFactory.createEmptyBorder()
         updateReaderFont()
 
@@ -160,7 +160,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         val index = stateService.state.chapterIndex
 
         previousButton.isEnabled = hasBook && index > 0
-        nextButton.isEnabled = hasBook && book != null && index < book.chapters.lastIndex
+        nextButton.isEnabled = hasBook && index < book.chapters.lastIndex
         chapterSelector.isEnabled = hasBook
         smallerButton.isEnabled = true
         largerButton.isEnabled = true
