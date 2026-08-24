@@ -34,4 +34,7 @@ class ReaderState {
     var fontSize: Int = 18
     var fontFamily: String? = null
     var lineSpacingPercent: Int = 20
+    var themeName: String = "跟随 IDE"
+    var widthMode: String = "舒适"
+    var hideCursor: Boolean = false
 }

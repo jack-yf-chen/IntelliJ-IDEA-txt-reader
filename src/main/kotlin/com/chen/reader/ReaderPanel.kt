@@ -7,20 +7,35 @@ import com.intellij.openapi.ui.Messages
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.util.ui.JBUI
 import java.awt.BorderLayout
+import java.awt.Color
+import java.awt.Component
+import java.awt.Cursor
 import java.awt.Dimension
 import java.awt.FlowLayout
 import java.awt.Font
 import java.awt.GraphicsEnvironment
 import java.awt.GridLayout
+import java.awt.Point
+import java.awt.Toolkit
+import java.awt.event.ComponentAdapter
+import java.awt.event.ComponentEvent
+import java.awt.event.InputEvent
+import java.awt.event.KeyEvent
 import java.awt.event.MouseWheelEvent
+import java.awt.image.BufferedImage
 import java.nio.file.Files
 import java.nio.file.Path
+import javax.swing.AbstractAction
 import javax.swing.BorderFactory
 import javax.swing.JButton
+import javax.swing.JCheckBox
 import javax.swing.JComboBox
+import javax.swing.JComponent
 import javax.swing.JLabel
 import javax.swing.JPanel
+import javax.swing.JScrollBar
 import javax.swing.JTextPane
+import javax.swing.KeyStroke
 import javax.swing.SwingUtilities
 import javax.swing.UIManager
 import javax.swing.text.SimpleAttributeSet
@@ -37,25 +52,36 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     private val looserLineButton = JButton("行距+")
     private val chapterSelector = JComboBox<Chapter>()
     private val fontSelector = JComboBox(loadFontFamilies().toTypedArray())
+    private val themeSelector = JComboBox(readerThemes.map { it.name }.toTypedArray())
+    private val widthSelector = JComboBox(widthModes.keys.toTypedArray())
+    private val hideCursorCheckBox = JCheckBox("隐藏光标")
     private val textPane = ReaderTextPane()
     private val scrollPane = JBScrollPane(textPane)
     private val statusLabel = JLabel("未打开文件")
+    private val defaultTextCursor = Cursor.getPredefinedCursor(Cursor.TEXT_CURSOR)
+    private val hiddenCursor = createHiddenCursor()
 
     private var currentBook: Book? = null
     private var updatingChapterSelector = false
     private var updatingFontSelector = false
+    private var updatingThemeSelector = false
+    private var updatingWidthSelector = false
     private var suppressBoundaryNavigation = false
     private var lastScrollValue = 0
 
     init {
         border = JBUI.Borders.empty(8)
         initializeFontSelector()
+        initializeThemeSelector()
+        initializeWidthSelector()
+        hideCursorCheckBox.isSelected = stateService.state.hideCursor
 
         textPane.isEditable = false
         textPane.margin = JBUI.insets(14)
-        textPane.background = UIManager.getColor("TextArea.background")
         textPane.border = BorderFactory.createEmptyBorder()
         updateReaderStyle()
+        updateCursorMode()
+        installKeyboardShortcuts()
 
         add(createToolbar(), BorderLayout.NORTH)
         add(scrollPane, BorderLayout.CENTER)
@@ -74,6 +100,22 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
                 updateReaderStyle()
             }
         }
+        themeSelector.addActionListener {
+            if (!updatingThemeSelector) {
+                stateService.state.themeName = themeSelector.selectedItem as String
+                updateReaderStyle()
+            }
+        }
+        widthSelector.addActionListener {
+            if (!updatingWidthSelector) {
+                stateService.state.widthMode = widthSelector.selectedItem as String
+                updateReaderInsets()
+            }
+        }
+        hideCursorCheckBox.addActionListener {
+            stateService.state.hideCursor = hideCursorCheckBox.isSelected
+            updateCursorMode()
+        }
         chapterSelector.addActionListener {
             if (!updatingChapterSelector) {
                 renderChapter(chapterSelector.selectedIndex, restoreScroll = false)
@@ -84,9 +126,15 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             if (!it.valueIsAdjusting) {
                 stateService.state.scrollValue = it.value
                 lastScrollValue = it.value
+                updateStatus()
             }
         }
         scrollPane.addMouseWheelListener(::handleBoundaryWheel)
+        scrollPane.viewport.addComponentListener(object : ComponentAdapter() {
+            override fun componentResized(event: ComponentEvent) {
+                updateReaderInsets()
+            }
+        })
 
         updateControls()
     }
@@ -105,12 +153,17 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         readingPanel.add(tighterLineButton)
         readingPanel.add(looserLineButton)
         readingPanel.add(fontSelector)
+        readingPanel.add(themeSelector)
+        readingPanel.add(widthSelector)
+        readingPanel.add(hideCursorCheckBox)
         buttonRows.add(navigationPanel)
         buttonRows.add(readingPanel)
 
         chapterSelector.minimumSize = Dimension(0, chapterSelector.preferredSize.height)
         fontSelector.minimumSize = Dimension(JBUI.scale(120), fontSelector.preferredSize.height)
         fontSelector.preferredSize = Dimension(JBUI.scale(150), fontSelector.preferredSize.height)
+        themeSelector.preferredSize = Dimension(JBUI.scale(100), themeSelector.preferredSize.height)
+        widthSelector.preferredSize = Dimension(JBUI.scale(80), widthSelector.preferredSize.height)
 
         toolbar.add(buttonRows, BorderLayout.NORTH)
         toolbar.add(chapterSelector, BorderLayout.CENTER)
@@ -124,6 +177,24 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             fontSelector.selectedItem = preferredFont
             updatingFontSelector = false
             stateService.state.fontFamily = preferredFont
+        }
+    }
+
+    private fun initializeThemeSelector() {
+        val themeName = stateService.state.themeName
+        if (themeSelector.getIndexOf(themeName) >= 0) {
+            updatingThemeSelector = true
+            themeSelector.selectedItem = themeName
+            updatingThemeSelector = false
+        }
+    }
+
+    private fun initializeWidthSelector() {
+        val widthMode = stateService.state.widthMode
+        if (widthSelector.getIndexOf(widthMode) >= 0) {
+            updatingWidthSelector = true
+            widthSelector.selectedItem = widthMode
+            updatingWidthSelector = false
         }
     }
 
@@ -192,6 +263,8 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             lastScrollValue = scrollValue
             stateService.state.scrollValue = scrollValue
             suppressBoundaryNavigation = false
+            textPane.requestFocusInWindow()
+            updateStatus()
         }
 
         updateControls()
@@ -218,7 +291,10 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
 
     private fun updateReaderStyle() {
         textPane.font = Font(selectedFontFamily(), Font.PLAIN, stateService.state.fontSize)
+        applyTheme()
+        updateReaderInsets()
         applyParagraphStyle()
+        updateStatus()
     }
 
     private fun applyParagraphStyle() {
@@ -226,6 +302,69 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         val attributes = SimpleAttributeSet()
         StyleConstants.setLineSpacing(attributes, stateService.state.lineSpacingPercent / 100f)
         document.setParagraphAttributes(0, document.length, attributes, false)
+    }
+
+    private fun applyTheme() {
+        val theme = selectedTheme()
+        val background = theme.background ?: UIManager.getColor("TextArea.background")
+        val foreground = theme.foreground ?: UIManager.getColor("TextArea.foreground")
+        textPane.background = background
+        textPane.foreground = foreground
+        textPane.caretColor = foreground
+        scrollPane.viewport.background = background
+    }
+
+    private fun updateReaderInsets() {
+        val base = JBUI.scale(14)
+        val viewportWidth = scrollPane.viewport.width.takeIf { it > 0 } ?: 0
+        val maxContentWidth = widthModes[stateService.state.widthMode] ?: widthModes.getValue("舒适")
+        val sideInset = if (maxContentWidth == null || viewportWidth == 0) {
+            base
+        } else {
+            ((viewportWidth - JBUI.scale(maxContentWidth)) / 2).coerceAtLeast(base)
+        }
+        textPane.margin = JBUI.insets(base, sideInset, base, sideInset)
+    }
+
+    private fun updateCursorMode() {
+        textPane.cursor = if (stateService.state.hideCursor) hiddenCursor else defaultTextCursor
+        textPane.caret.isVisible = false
+        textPane.caret.isSelectionVisible = true
+    }
+
+    private fun installKeyboardShortcuts() {
+        bindShortcut("向下翻页", KeyStroke.getKeyStroke(KeyEvent.VK_SPACE, 0)) { scrollPage(1) }
+        bindShortcut("向上翻页", KeyStroke.getKeyStroke(KeyEvent.VK_SPACE, InputEvent.SHIFT_DOWN_MASK)) { scrollPage(-1) }
+        bindShortcut("PageDown", KeyStroke.getKeyStroke(KeyEvent.VK_PAGE_DOWN, 0)) { scrollPage(1) }
+        bindShortcut("PageUp", KeyStroke.getKeyStroke(KeyEvent.VK_PAGE_UP, 0)) { scrollPage(-1) }
+        bindShortcut("下一章", KeyStroke.getKeyStroke(KeyEvent.VK_RIGHT, InputEvent.ALT_DOWN_MASK)) { moveChapter(1) }
+        bindShortcut("上一章", KeyStroke.getKeyStroke(KeyEvent.VK_LEFT, InputEvent.ALT_DOWN_MASK)) { moveChapter(-1) }
+        bindShortcut("增大字号", KeyStroke.getKeyStroke(KeyEvent.VK_EQUALS, InputEvent.CTRL_DOWN_MASK)) { changeFontSize(1) }
+        bindShortcut("减小字号", KeyStroke.getKeyStroke(KeyEvent.VK_MINUS, InputEvent.CTRL_DOWN_MASK)) { changeFontSize(-1) }
+        bindShortcut("增大行距", KeyStroke.getKeyStroke(KeyEvent.VK_CLOSE_BRACKET, InputEvent.CTRL_DOWN_MASK)) { changeLineSpacing(10) }
+        bindShortcut("减小行距", KeyStroke.getKeyStroke(KeyEvent.VK_OPEN_BRACKET, InputEvent.CTRL_DOWN_MASK)) { changeLineSpacing(-10) }
+    }
+
+    private fun bindShortcut(name: String, keyStroke: KeyStroke, action: () -> Unit) {
+        val inputMap = textPane.getInputMap(JComponent.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT)
+        inputMap.put(keyStroke, name)
+        textPane.actionMap.put(name, object : AbstractAction() {
+            override fun actionPerformed(event: java.awt.event.ActionEvent?) {
+                action()
+            }
+        })
+    }
+
+    private fun scrollPage(direction: Int) {
+        val scrollBar = scrollPane.verticalScrollBar
+        val delta = (scrollBar.visibleAmount * 0.86).toInt().coerceAtLeast(JBUI.scale(80))
+        val nextValue = (scrollBar.value + delta * direction).coerceIn(
+            0,
+            (scrollBar.maximum - scrollBar.visibleAmount).coerceAtLeast(0),
+        )
+        scrollBar.value = nextValue
+        stateService.state.scrollValue = nextValue
+        updateStatus()
     }
 
     private fun handleBoundaryWheel(event: MouseWheelEvent) {
@@ -263,13 +402,44 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         tighterLineButton.isEnabled = true
         looserLineButton.isEnabled = true
         fontSelector.isEnabled = true
+        themeSelector.isEnabled = true
+        widthSelector.isEnabled = true
+        hideCursorCheckBox.isEnabled = true
 
+        updateStatus()
+    }
+
+    private fun updateStatus() {
+        val book = currentBook
         statusLabel.text = if (book == null) {
             "未打开文件"
         } else {
             val fileName = book.path.fileName.toString()
-            "$fileName | 第 ${index + 1}/${book.chapters.size} 章 | ${selectedFontFamily()} | 字号 ${stateService.state.fontSize} | 行距 ${100 + stateService.state.lineSpacingPercent}% | ${book.charset.name()}"
+            val index = stateService.state.chapterIndex
+            "$fileName | 第 ${index + 1}/${book.chapters.size} 章 | 本章 ${chapterProgress()} | 全书 ${bookProgress()} | ${selectedFontFamily()} | 字号 ${stateService.state.fontSize} | 行距 ${100 + stateService.state.lineSpacingPercent}% | ${book.charset.name()}"
         }
+    }
+
+    private fun chapterProgress(): String {
+        val scrollBar = scrollPane.verticalScrollBar
+        val maxScrollValue = (scrollBar.maximum - scrollBar.visibleAmount).coerceAtLeast(0)
+        val percent = if (maxScrollValue == 0) 100 else (scrollBar.value * 100 / maxScrollValue).coerceIn(0, 100)
+        return "$percent%"
+    }
+
+    private fun bookProgress(): String {
+        val book = currentBook ?: return "0%"
+        val chapter = book.chapters.getOrNull(stateService.state.chapterIndex) ?: return "0%"
+        val scrollBar = scrollPane.verticalScrollBar
+        val maxScrollValue = (scrollBar.maximum - scrollBar.visibleAmount).coerceAtLeast(0)
+        val scrollRatio = if (maxScrollValue == 0) 1.0 else scrollBar.value.toDouble() / maxScrollValue
+        val currentOffset = chapter.startOffset + ((chapter.endOffset - chapter.startOffset) * scrollRatio).toInt()
+        val percent = if (book.content.isEmpty()) 100 else (currentOffset * 100 / book.content.length).coerceIn(0, 100)
+        return "$percent%"
+    }
+
+    private fun selectedTheme(): ReaderTheme {
+        return readerThemes.firstOrNull { it.name == stateService.state.themeName } ?: readerThemes.first()
     }
 
     private fun JComboBox<String>.getIndexOf(value: String): Int {
@@ -296,6 +466,20 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     }
 
     companion object {
+        private val widthModes = linkedMapOf(
+            "紧凑" to 680,
+            "舒适" to 820,
+            "宽松" to 980,
+            "填满" to null,
+        )
+
+        private val readerThemes = listOf(
+            ReaderTheme("跟随 IDE", null, null),
+            ReaderTheme("护眼", Color(0xEAF2DD), Color(0x26311F)),
+            ReaderTheme("纸张", Color(0xF7F1E3), Color(0x2B2118)),
+            ReaderTheme("暗色", Color(0x1F2329), Color(0xD6D6D6)),
+        )
+
         private val preferredFontFamilies = listOf(
             "Microsoft YaHei",
             "Microsoft YaHei UI",
@@ -311,6 +495,17 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     }
 }
 
+private data class ReaderTheme(
+    val name: String,
+    val background: Color?,
+    val foreground: Color?,
+)
+
 private class ReaderTextPane : JTextPane() {
     override fun getScrollableTracksViewportWidth(): Boolean = true
+}
+
+private fun createHiddenCursor(): Cursor {
+    val image = BufferedImage(16, 16, BufferedImage.TYPE_INT_ARGB)
+    return Toolkit.getDefaultToolkit().createCustomCursor(image, Point(0, 0), "hidden-reader-cursor")
 }

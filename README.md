@@ -16,6 +16,10 @@ Novel Reader 是一个轻量级 IntelliJ Platform 插件，用于在 IntelliJ ID
 - 上一章 / 下一章导航。
 - 章节边界连续滚动切换。
 - 字号、行距、字体样式调整。
+- 阅读主题和正文宽度调整。
+- 本章进度和全书进度显示。
+- 阅读快捷键。
+- 阅读区隐藏鼠标光标。
 - 阅读状态持久化。
 
 构建：
@@ -31,4 +35,3 @@ build/distributions/
 ```
 
 如果 `gradle` 不在 `PATH` 中，可以安装 Gradle，或用 IntelliJ IDEA 将本目录作为 Gradle 项目打开，然后在 Gradle 工具窗口中运行 `buildPlugin` 任务。
-
