@@ -435,7 +435,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         } else {
             val fileName = book.path.fileName.toString()
             val index = stateService.state.chapterIndex
-            "$fileName | 第 ${index + 1}/${book.chapters.size} 章 | 本章 ${chapterProgress()} | 全书 ${bookProgress()} | ${selectedFontFamily()} | 字号 ${stateService.state.fontSize} | 行距 ${100 + stateService.state.lineSpacingPercent}% | ${book.charset.name()}"
+            "$fileName | 第 ${index + 1}/${book.chapters.size} 章 | 本章 ${chapterProgress()} | 全书 ${bookProgress()} | ${book.charset.name()}"
         }
     }
 
