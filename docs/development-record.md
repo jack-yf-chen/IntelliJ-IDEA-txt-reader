@@ -75,6 +75,7 @@ Date: 2026-08-24
 - 2026-08-24: Verified `buildPlugin` with IDEA 2026.1.3 bundled JBR as Gradle runtime. Build completed successfully and generated a plugin ZIP under `build/distributions/`.
 - 2026-08-24: Started `runIde` successfully. The sandbox IntelliJ IDEA 2026.1.3 Welcome window opened, the project trust dialog was reached, and the Microsoft Defender exclusion checkbox was cleared before trusting. Further UI verification was stopped when the user pressed Escape to stop Computer Use.
 - 2026-08-24: Fixed toolbar clipping when the Novel Reader tool window is narrow. The action buttons now stay on the first row and the chapter selector fills a second row, preventing the chapter selector and later buttons from being hidden.
+- 2026-08-24: Added reading comfort controls. The reader now uses `JTextPane` with paragraph styling, keeps font size controls, adds line spacing controls, persists line spacing, and shows current font size and line spacing in the status bar.
 
 ## Next Validation Steps
 
