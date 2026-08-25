@@ -3,6 +3,10 @@ package com.chen.reader
 import com.chen.reader.model.Book
 import com.chen.reader.model.Chapter
 import com.intellij.ide.BrowserUtil
+import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.progress.ProgressIndicator
+import com.intellij.openapi.progress.ProgressManager
+import com.intellij.openapi.progress.Task
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
 import com.intellij.ui.components.JBScrollPane
@@ -214,29 +218,29 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
 
     private fun createSelectionPopupMenu(): JPopupMenu {
         val popup = JPopupMenu()
+        val localDictionaryItem = JMenuItem("本地词典查找")
         val dictionaryItem = JMenuItem("汉典查词")
-        val translateItem = JMenuItem("DeepL 翻译")
-        val searchItem = JMenuItem("浏览器搜索")
+        val searchItem = JMenuItem("百度搜索")
         val copyItem = JMenuItem("复制")
 
+        localDictionaryItem.addActionListener { showLocalDictionaryLookup() }
         dictionaryItem.addActionListener { openDictionaryLookup() }
-        translateItem.addActionListener { openDeepLTranslation() }
         searchItem.addActionListener { openBrowserSearch() }
         copyItem.addActionListener {
             textPane.copy()
             focusReader()
         }
 
+        popup.add(localDictionaryItem)
         popup.add(dictionaryItem)
-        popup.add(translateItem)
         popup.add(searchItem)
         popup.addSeparator()
         popup.add(copyItem)
         popup.addPopupMenuListener(object : PopupMenuListener {
             override fun popupMenuWillBecomeVisible(event: PopupMenuEvent?) {
                 val hasSelection = selectedLookupText() != null
+                localDictionaryItem.isEnabled = hasSelection
                 dictionaryItem.isEnabled = hasSelection
-                translateItem.isEnabled = hasSelection
                 searchItem.isEnabled = hasSelection
                 copyItem.isEnabled = hasSelection
             }
@@ -543,21 +547,39 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         }
     }
 
+    private fun showLocalDictionaryLookup() {
+        val text = selectedLookupText(MAX_DICTIONARY_SELECTION_LENGTH) ?: return
+        ProgressManager.getInstance().run(object : Task.Backgroundable(project, "本地词典查找", false) {
+            override fun run(indicator: ProgressIndicator) {
+                indicator.text = "正在查找：$text"
+                val message = try {
+                    val result = LocalDictionary.lookup(text)
+                    if (result == null) {
+                        "本地词典未找到：$text"
+                    } else {
+                        result.body
+                    }
+                } catch (error: Throwable) {
+                    "本地词典加载或查找失败：${error.message ?: error.javaClass.simpleName}"
+                }
+
+                ApplicationManager.getApplication().invokeLater {
+                    Messages.showInfoMessage(project, message, "本地词典：$text")
+                    focusReader()
+                }
+            }
+        })
+    }
+
     private fun openDictionaryLookup() {
         val text = selectedLookupText(MAX_DICTIONARY_SELECTION_LENGTH) ?: return
         BrowserUtil.browse("https://www.zdic.net/hans/${encodeUrlComponent(text)}")
         focusReader()
     }
 
-    private fun openDeepLTranslation() {
-        val text = selectedLookupText(MAX_TRANSLATION_SELECTION_LENGTH) ?: return
-        BrowserUtil.browse("https://www.deepl.com/translator#auto/zh-hans/${encodeUrlComponent(text)}")
-        focusReader()
-    }
-
     private fun openBrowserSearch() {
         val text = selectedLookupText(MAX_TRANSLATION_SELECTION_LENGTH) ?: return
-        BrowserUtil.browse("https://www.bing.com/search?q=${encodeUrlComponent(text)}")
+        BrowserUtil.browse("https://www.baidu.com/s?wd=${encodeUrlComponent(text)}")
         focusReader()
     }
 
