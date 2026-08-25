@@ -166,7 +166,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             if (!it.valueIsAdjusting) {
                 stateService.state.scrollValue = it.value
                 lastScrollValue = it.value
-                updateCurrentChapterFromScroll()
+                updateReadingPositionFromViewport()
                 updateStatus()
             }
         }
@@ -355,6 +355,9 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             if (!restoreState) {
                 state.chapterIndex = 0
                 state.scrollValue = 0
+                state.globalOffset = 0
+                state.anchorText = ""
+                state.progressInChapterPermille = 0
             }
 
             updateChapterSelector(book.chapters)
@@ -405,12 +408,13 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             val maxScrollValue = (scrollBar.maximum - scrollBar.visibleAmount).coerceAtLeast(0)
             val scrollValue = when {
                 scrollToBottom -> scrollValueForOffset(chapter.endOffset, alignEnd = true).coerceIn(0, maxScrollValue)
-                restoreScroll -> stateService.state.scrollValue.coerceIn(0, maxScrollValue)
+                restoreScroll -> restoreScrollValue(book, chapter).coerceIn(0, maxScrollValue)
                 else -> scrollValueForOffset(chapter.startOffset, alignEnd = false).coerceIn(0, maxScrollValue)
             }
             scrollPane.verticalScrollBar.value = scrollValue
             lastScrollValue = scrollValue
             stateService.state.scrollValue = scrollValue
+            updateReadingPositionForOffset(viewportStartOffset())
             suppressBoundaryNavigation = false
             focusReader()
             updateStatus()
@@ -435,9 +439,21 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             return
         }
 
+        updateReadingPositionFromViewport()
+    }
+
+    private fun updateReadingPositionFromViewport() {
+        if (suppressBoundaryNavigation) {
+            return
+        }
+
+        updateReadingPositionForOffset(viewportStartOffset())
+    }
+
+    private fun updateReadingPositionForOffset(offset: Int) {
         val book = currentBook ?: return
-        val offset = viewportStartOffset()
-        val index = book.chapters.indexOfLast { offset >= it.startOffset }.coerceAtLeast(0)
+        val index = chapterIndexForOffset(book, offset)
+        saveReadingAnchor(book, index, offset)
         if (index == stateService.state.chapterIndex) {
             return
         }
@@ -448,6 +464,72 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         chapterSelector.toolTipText = book.chapters[index].title
         updatingChapterSelector = false
         updateControls()
+    }
+
+    private fun saveReadingAnchor(book: Book, chapterIndex: Int, offset: Int) {
+        val chapter = book.chapters.getOrNull(chapterIndex) ?: return
+        val safeOffset = offset.coerceIn(0, book.content.length)
+        val chapterLength = (chapter.endOffset - chapter.startOffset).coerceAtLeast(1)
+        val progress = ((safeOffset - chapter.startOffset).coerceIn(0, chapterLength) * 1000 / chapterLength)
+            .coerceIn(0, 1000)
+
+        val state = stateService.state
+        state.globalOffset = safeOffset
+        state.anchorText = anchorTextAt(book.content, safeOffset)
+        state.progressInChapterPermille = progress
+    }
+
+    private fun restoreScrollValue(book: Book, chapter: Chapter): Int {
+        val state = stateService.state
+        val offset = restoreOffset(book, chapter)
+        return if (offset != null) {
+            scrollValueForOffset(offset, alignEnd = false)
+        } else {
+            state.scrollValue
+        }
+    }
+
+    private fun restoreOffset(book: Book, chapter: Chapter): Int? {
+        val state = stateService.state
+        val savedOffset = state.globalOffset.takeIf { it in 0..book.content.length }
+        val anchor = state.anchorText.takeIf { it.isNotBlank() }
+
+        if (savedOffset != null && anchor != null) {
+            findAnchorNear(book.content, anchor, savedOffset)?.let { return it }
+        }
+
+        if (savedOffset != null && state.globalOffset > 0) {
+            return savedOffset
+        }
+
+        if (state.progressInChapterPermille in 1..1000) {
+            val chapterLength = (chapter.endOffset - chapter.startOffset).coerceAtLeast(1)
+            return chapter.startOffset + chapterLength * state.progressInChapterPermille / 1000
+        }
+
+        return null
+    }
+
+    private fun findAnchorNear(content: String, anchor: String, savedOffset: Int): Int? {
+        val start = (savedOffset - ANCHOR_SEARCH_RADIUS).coerceAtLeast(0)
+        val end = (savedOffset + ANCHOR_SEARCH_RADIUS + anchor.length).coerceAtMost(content.length)
+        val localIndex = content.substring(start, end).indexOf(anchor)
+        if (localIndex >= 0) {
+            return start + localIndex
+        }
+
+        val globalIndex = content.indexOf(anchor)
+        return globalIndex.takeIf { it >= 0 }
+    }
+
+    private fun anchorTextAt(content: String, offset: Int): String {
+        val start = offset.coerceIn(0, content.length)
+        val end = (start + ANCHOR_TEXT_LENGTH).coerceAtMost(content.length)
+        return content.substring(start, end)
+    }
+
+    private fun chapterIndexForOffset(book: Book, offset: Int): Int {
+        return book.chapters.indexOfLast { offset >= it.startOffset }.coerceAtLeast(0)
     }
 
     private fun viewportStartOffset(): Int {
@@ -802,6 +884,8 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         private const val CHAPTER_SELECTOR_WIDTH = 96
         private const val MAX_DICTIONARY_SELECTION_LENGTH = 80
         private const val MAX_TRANSLATION_SELECTION_LENGTH = 500
+        private const val ANCHOR_TEXT_LENGTH = 80
+        private const val ANCHOR_SEARCH_RADIUS = 3000
         private const val BUTTON_STYLE_TEXT = "文字"
         private const val BUTTON_STYLE_ICON = "图标"
         private val chapterPrefix = Regex("""^第[0-9零〇一二两三四五六七八九十百千万]{1,12}[章节回卷集部篇]""")

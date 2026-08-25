@@ -31,6 +31,9 @@ class ReaderState {
     var charsetName: String? = null
     var chapterIndex: Int = 0
     var scrollValue: Int = 0
+    var globalOffset: Int = 0
+    var anchorText: String = ""
+    var progressInChapterPermille: Int = 0
     var fontSize: Int = 18
     var fontFamily: String? = null
     var textColorName: String = "跟随主题"
