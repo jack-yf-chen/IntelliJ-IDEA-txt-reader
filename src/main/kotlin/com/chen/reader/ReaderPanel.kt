@@ -88,6 +88,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     private var suppressBoundaryNavigation = false
     private var settingsVisible = false
     private var lastScrollValue = 0
+    private var renderedBookPath: Path? = null
 
     init {
         border = JBUI.Borders.empty(8)
@@ -165,6 +166,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             if (!it.valueIsAdjusting) {
                 stateService.state.scrollValue = it.value
                 lastScrollValue = it.value
+                updateCurrentChapterFromScroll()
                 updateStatus()
             }
         }
@@ -346,6 +348,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             val preferredCharset = if (restoreState && state.filePath == path.toString()) state.charsetName else null
             val book = TxtBookLoader.load(path, preferredCharset)
             currentBook = book
+            renderedBookPath = null
 
             state.filePath = path.toString()
             state.charsetName = book.charset.name()
@@ -356,6 +359,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
 
             updateChapterSelector(book.chapters)
             val index = state.chapterIndex.coerceIn(0, book.chapters.lastIndex)
+            renderBook()
             renderChapter(index, restoreScroll = restoreState)
         } catch (error: Throwable) {
             Messages.showErrorDialog(project, error.message ?: "打开 TXT 文件失败。", "Novel Reader")
@@ -368,6 +372,19 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         renderChapter(nextIndex, restoreScroll = false)
     }
 
+    private fun renderBook() {
+        val book = currentBook ?: return
+        if (renderedBookPath == book.path) {
+            return
+        }
+
+        suppressBoundaryNavigation = true
+        textPane.text = book.content
+        applyParagraphStyle()
+        textPane.caretPosition = 0
+        renderedBookPath = book.path
+    }
+
     private fun renderChapter(index: Int, restoreScroll: Boolean, scrollToBottom: Boolean = false) {
         val book = currentBook ?: return
         if (index !in book.chapters.indices) {
@@ -377,10 +394,6 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         suppressBoundaryNavigation = true
         val chapter = book.chapters[index]
         stateService.state.chapterIndex = index
-        val text = book.content.substring(chapter.startOffset, chapter.endOffset).trimStart()
-        textPane.text = text
-        applyParagraphStyle()
-        textPane.caretPosition = 0
 
         updatingChapterSelector = true
         chapterSelector.selectedIndex = index
@@ -391,9 +404,9 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             val scrollBar = scrollPane.verticalScrollBar
             val maxScrollValue = (scrollBar.maximum - scrollBar.visibleAmount).coerceAtLeast(0)
             val scrollValue = when {
-                scrollToBottom -> maxScrollValue
+                scrollToBottom -> scrollValueForOffset(chapter.endOffset, alignEnd = true).coerceIn(0, maxScrollValue)
                 restoreScroll -> stateService.state.scrollValue.coerceIn(0, maxScrollValue)
-                else -> 0
+                else -> scrollValueForOffset(chapter.startOffset, alignEnd = false).coerceIn(0, maxScrollValue)
             }
             scrollPane.verticalScrollBar.value = scrollValue
             lastScrollValue = scrollValue
@@ -404,6 +417,43 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         }
 
         updateControls()
+    }
+
+    private fun scrollValueForOffset(offset: Int, alignEnd: Boolean): Int {
+        val documentLength = textPane.document.length
+        val safeOffset = offset.coerceIn(0, documentLength)
+        val viewBounds = textPane.modelToView2D(safeOffset)?.bounds ?: return 0
+        return if (alignEnd) {
+            viewBounds.y - scrollPane.verticalScrollBar.visibleAmount + viewBounds.height + JBUI.scale(24)
+        } else {
+            viewBounds.y
+        }
+    }
+
+    private fun updateCurrentChapterFromScroll() {
+        if (suppressBoundaryNavigation) {
+            return
+        }
+
+        val book = currentBook ?: return
+        val offset = viewportStartOffset()
+        val index = book.chapters.indexOfLast { offset >= it.startOffset }.coerceAtLeast(0)
+        if (index == stateService.state.chapterIndex) {
+            return
+        }
+
+        stateService.state.chapterIndex = index
+        updatingChapterSelector = true
+        chapterSelector.selectedIndex = index
+        chapterSelector.toolTipText = book.chapters[index].title
+        updatingChapterSelector = false
+        updateControls()
+    }
+
+    private fun viewportStartOffset(): Int {
+        val viewport = scrollPane.viewport
+        val point = Point(JBUI.scale(4), viewport.viewPosition.y + JBUI.scale(4))
+        return textPane.viewToModel2D(point).coerceIn(0, textPane.document.length)
     }
 
     private fun updateChapterSelector(chapters: List<Chapter>) {
@@ -517,7 +567,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     }
 
     private fun scrollBy(delta: Int) {
-        val book = currentBook ?: return
+        currentBook ?: return
         val scrollBar = scrollPane.verticalScrollBar
         val maxScrollValue = (scrollBar.maximum - scrollBar.visibleAmount).coerceAtLeast(0)
         val currentValue = scrollBar.value
@@ -525,19 +575,11 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             0,
             maxScrollValue,
         )
-        val index = stateService.state.chapterIndex
-
-        if (nextValue == currentValue && !suppressBoundaryNavigation) {
-            when {
-                delta > 0 && index < book.chapters.lastIndex -> renderChapter(index + 1, restoreScroll = false)
-                delta < 0 && index > 0 -> renderChapter(index - 1, restoreScroll = false, scrollToBottom = true)
-            }
-            return
-        }
 
         scrollBar.value = nextValue
         stateService.state.scrollValue = nextValue
         lastScrollValue = nextValue
+        updateCurrentChapterFromScroll()
         updateStatus()
     }
 
@@ -598,23 +640,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     }
 
     private fun handleBoundaryWheel(event: MouseWheelEvent) {
-        val book = currentBook ?: return
-        val scrollBar = scrollPane.verticalScrollBar
-        val maxScrollValue = (scrollBar.maximum - scrollBar.visibleAmount).coerceAtLeast(0)
-        if (suppressBoundaryNavigation) {
-            return
-        }
-
-        val index = stateService.state.chapterIndex
-        val atBottom = scrollBar.value >= maxScrollValue - JBUI.scale(4)
-        val atTop = scrollBar.value <= JBUI.scale(4)
-        if (event.wheelRotation > 0 && atBottom && index < book.chapters.lastIndex) {
-            event.consume()
-            renderChapter(index + 1, restoreScroll = false)
-        } else if (event.wheelRotation < 0 && atTop && index > 0) {
-            event.consume()
-            renderChapter(index - 1, restoreScroll = false, scrollToBottom = true)
-        }
+        updateCurrentChapterFromScroll()
     }
 
     private fun selectedFontFamily(): String = stateService.state.fontFamily ?: defaultFontFamily()
@@ -651,19 +677,17 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     }
 
     private fun chapterProgress(): String {
-        val scrollBar = scrollPane.verticalScrollBar
-        val maxScrollValue = (scrollBar.maximum - scrollBar.visibleAmount).coerceAtLeast(0)
-        val percent = if (maxScrollValue == 0) 100 else (scrollBar.value * 100 / maxScrollValue).coerceIn(0, 100)
+        val book = currentBook ?: return "0%"
+        val chapter = book.chapters.getOrNull(stateService.state.chapterIndex) ?: return "0%"
+        val chapterLength = (chapter.endOffset - chapter.startOffset).coerceAtLeast(1)
+        val currentOffset = viewportStartOffset().coerceIn(chapter.startOffset, chapter.endOffset)
+        val percent = ((currentOffset - chapter.startOffset) * 100 / chapterLength).coerceIn(0, 100)
         return "$percent%"
     }
 
     private fun bookProgress(): String {
         val book = currentBook ?: return "0%"
-        val chapter = book.chapters.getOrNull(stateService.state.chapterIndex) ?: return "0%"
-        val scrollBar = scrollPane.verticalScrollBar
-        val maxScrollValue = (scrollBar.maximum - scrollBar.visibleAmount).coerceAtLeast(0)
-        val scrollRatio = if (maxScrollValue == 0) 1.0 else scrollBar.value.toDouble() / maxScrollValue
-        val currentOffset = chapter.startOffset + ((chapter.endOffset - chapter.startOffset) * scrollRatio).toInt()
+        val currentOffset = viewportStartOffset()
         val percent = if (book.content.isEmpty()) 100 else (currentOffset * 100 / book.content.length).coerceIn(0, 100)
         return "$percent%"
     }
