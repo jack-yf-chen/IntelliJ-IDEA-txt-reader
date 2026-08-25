@@ -635,7 +635,8 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         } else {
             ((viewportWidth - JBUI.scale(maxContentWidth)) / 2).coerceAtLeast(base)
         }
-        textPane.margin = JBUI.insets(base, sideInset, base, sideInset)
+        val rightInset = sideInset + JBUI.scale(RIGHT_SELECTION_GUTTER)
+        textPane.margin = JBUI.insets(base, sideInset, base, rightInset)
     }
 
     private fun scheduleRelayoutRestore() {
@@ -946,6 +947,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         private const val ANCHOR_SEARCH_RADIUS = 3000
         private const val RENDER_CONTEXT_CHARS = 5000
         private const val VIEWPORT_ANCHOR_RATIO = 0.25
+        private const val RIGHT_SELECTION_GUTTER = 28
         private const val BUTTON_STYLE_TEXT = "文字"
         private const val BUTTON_STYLE_ICON = "图标"
         private val chapterPrefix = Regex("""^第[0-9零〇一二两三四五六七八九十百千万]{1,12}[章节回卷集部篇]""")
