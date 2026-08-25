@@ -2,6 +2,7 @@ package com.chen.reader
 
 import com.chen.reader.model.Book
 import com.chen.reader.model.Chapter
+import com.intellij.ide.BrowserUtil
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
 import com.intellij.ui.components.JBScrollPane
@@ -24,8 +25,11 @@ import java.awt.event.InputEvent
 import java.awt.event.KeyEvent
 import java.awt.event.MouseWheelEvent
 import java.awt.image.BufferedImage
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.WeakHashMap
 import javax.swing.AbstractAction
 import javax.swing.BorderFactory
 import javax.swing.JButton
@@ -36,15 +40,18 @@ import javax.swing.Icon
 import javax.swing.DefaultListCellRenderer
 import javax.swing.JLabel
 import javax.swing.JList
+import javax.swing.JMenuItem
 import javax.swing.JPanel
+import javax.swing.JPopupMenu
 import javax.swing.JTextPane
 import javax.swing.KeyStroke
 import javax.swing.SwingUtilities
 import javax.swing.UIManager
+import javax.swing.event.PopupMenuEvent
+import javax.swing.event.PopupMenuListener
 import javax.swing.text.DefaultCaret
 import javax.swing.text.SimpleAttributeSet
 import javax.swing.text.StyleConstants
-import java.util.WeakHashMap
 
 class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     private val stateService = ReaderStateService.getInstance(project)
@@ -93,6 +100,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         textPane.caret = InvisibleCaret()
         textPane.margin = JBUI.insets(14)
         textPane.border = BorderFactory.createEmptyBorder()
+        textPane.componentPopupMenu = createSelectionPopupMenu()
         updateReaderStyle()
         updateCursorMode()
         installKeyboardShortcuts()
@@ -202,6 +210,42 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         toolbar.add(mainRow, BorderLayout.NORTH)
         toolbar.add(settingsPanel, BorderLayout.CENTER)
         return toolbar
+    }
+
+    private fun createSelectionPopupMenu(): JPopupMenu {
+        val popup = JPopupMenu()
+        val dictionaryItem = JMenuItem("汉典查词")
+        val translateItem = JMenuItem("DeepL 翻译")
+        val searchItem = JMenuItem("浏览器搜索")
+        val copyItem = JMenuItem("复制")
+
+        dictionaryItem.addActionListener { openDictionaryLookup() }
+        translateItem.addActionListener { openDeepLTranslation() }
+        searchItem.addActionListener { openBrowserSearch() }
+        copyItem.addActionListener {
+            textPane.copy()
+            focusReader()
+        }
+
+        popup.add(dictionaryItem)
+        popup.add(translateItem)
+        popup.add(searchItem)
+        popup.addSeparator()
+        popup.add(copyItem)
+        popup.addPopupMenuListener(object : PopupMenuListener {
+            override fun popupMenuWillBecomeVisible(event: PopupMenuEvent?) {
+                val hasSelection = selectedLookupText() != null
+                dictionaryItem.isEnabled = hasSelection
+                translateItem.isEnabled = hasSelection
+                searchItem.isEnabled = hasSelection
+                copyItem.isEnabled = hasSelection
+            }
+
+            override fun popupMenuWillBecomeInvisible(event: PopupMenuEvent?) = Unit
+
+            override fun popupMenuCanceled(event: PopupMenuEvent?) = Unit
+        })
+        return popup
     }
 
     private fun configureChapterSelector() {
@@ -499,6 +543,38 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         }
     }
 
+    private fun openDictionaryLookup() {
+        val text = selectedLookupText(MAX_DICTIONARY_SELECTION_LENGTH) ?: return
+        BrowserUtil.browse("https://www.zdic.net/hans/${encodeUrlComponent(text)}")
+        focusReader()
+    }
+
+    private fun openDeepLTranslation() {
+        val text = selectedLookupText(MAX_TRANSLATION_SELECTION_LENGTH) ?: return
+        BrowserUtil.browse("https://www.deepl.com/translator#auto/zh-hans/${encodeUrlComponent(text)}")
+        focusReader()
+    }
+
+    private fun openBrowserSearch() {
+        val text = selectedLookupText(MAX_TRANSLATION_SELECTION_LENGTH) ?: return
+        BrowserUtil.browse("https://www.bing.com/search?q=${encodeUrlComponent(text)}")
+        focusReader()
+    }
+
+    private fun selectedLookupText(maxLength: Int = MAX_TRANSLATION_SELECTION_LENGTH): String? {
+        val normalizedText = textPane.selectedText
+            ?.replace(whitespaceRegex, " ")
+            ?.trim()
+            ?: return null
+        return normalizedText
+            .takeIf { it.isNotBlank() }
+            ?.take(maxLength)
+    }
+
+    private fun encodeUrlComponent(text: String): String {
+        return URLEncoder.encode(text, StandardCharsets.UTF_8).replace("+", "%20")
+    }
+
     private fun handleBoundaryWheel(event: MouseWheelEvent) {
         val book = currentBook ?: return
         val scrollBar = scrollPane.verticalScrollBar
@@ -678,10 +754,13 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
 
         private const val SETTINGS_PANEL_NAME = "reader-settings-panel"
         private const val CHAPTER_SELECTOR_WIDTH = 96
+        private const val MAX_DICTIONARY_SELECTION_LENGTH = 80
+        private const val MAX_TRANSLATION_SELECTION_LENGTH = 500
         private const val BUTTON_STYLE_TEXT = "文字"
         private const val BUTTON_STYLE_ICON = "图标"
         private val chapterPrefix = Regex("""^第[0-9零〇一二两三四五六七八九十百千万]{1,12}[章节回卷集部篇]""")
         private val englishChapterPrefix = Regex("""(?i)^chapter\s+\d+""")
+        private val whitespaceRegex = Regex("""\s+""")
         private val panelsByProject = WeakHashMap<Project, MutableSet<ReaderPanel>>()
 
         private fun registerPanel(project: Project, panel: ReaderPanel) {
