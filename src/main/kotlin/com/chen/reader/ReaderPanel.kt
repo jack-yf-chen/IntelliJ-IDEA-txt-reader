@@ -34,6 +34,7 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.WeakHashMap
+import kotlin.math.sign
 import javax.swing.AbstractAction
 import javax.swing.BorderFactory
 import javax.swing.JButton
@@ -408,6 +409,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         targetOffset: Int,
         alignEnd: Boolean = false,
         preserveAnchor: Boolean = false,
+        followUpDelta: Int = 0,
     ) {
         val book = currentBook ?: return
         if (index !in book.chapters.indices) {
@@ -424,6 +426,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         }
 
         SwingUtilities.invokeLater {
+            pendingWindowSwitch = false
             val scrollBar = scrollPane.verticalScrollBar
             val maxScrollValue = (scrollBar.maximum - scrollBar.visibleAmount).coerceAtLeast(0)
             val scrollValue = scrollValueForGlobalOffset(targetOffset, alignEnd, preserveAnchor).coerceIn(0, maxScrollValue)
@@ -432,6 +435,9 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             stateService.state.scrollValue = scrollValue
             suppressBoundaryNavigation = false
             updateReadingPositionForGlobalOffset(viewportAnchorOffset())
+            if (followUpDelta != 0) {
+                scrollBy(followUpDelta, allowWindowSwitch = false)
+            }
             focusReader()
             updateStatus()
         }
@@ -707,8 +713,12 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         scrollBy(delta * direction)
     }
 
-    private fun scrollBy(delta: Int) {
+    private fun scrollBy(delta: Int, allowWindowSwitch: Boolean = true) {
         currentBook ?: return
+        if (allowWindowSwitch && switchRenderWindowIfNeeded(delta)) {
+            return
+        }
+
         val scrollBar = scrollPane.verticalScrollBar
         val maxScrollValue = (scrollBar.maximum - scrollBar.visibleAmount).coerceAtLeast(0)
         val currentValue = scrollBar.value
@@ -722,6 +732,35 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         lastScrollValue = nextValue
         updateCurrentChapterFromScroll()
         updateStatus()
+    }
+
+    private fun switchRenderWindowIfNeeded(delta: Int): Boolean {
+        val book = currentBook ?: return false
+        val window = renderWindow ?: return false
+        if (delta == 0 || pendingWindowSwitch || suppressBoundaryNavigation) {
+            return false
+        }
+
+        val scrollBar = scrollPane.verticalScrollBar
+        val maxScrollValue = (scrollBar.maximum - scrollBar.visibleAmount).coerceAtLeast(0)
+        val threshold = (scrollBar.visibleAmount * WINDOW_SWITCH_THRESHOLD_RATIO).toInt().coerceAtLeast(JBUI.scale(120))
+        val targetIndex = when {
+            delta > 0 && scrollBar.value >= maxScrollValue - threshold -> (window.chapterIndex + 1)
+                .takeIf { it <= book.chapters.lastIndex }
+            delta < 0 && scrollBar.value <= threshold -> (window.chapterIndex - 1)
+                .takeIf { it >= 0 }
+            else -> null
+        } ?: return false
+
+        val targetOffset = stateService.state.globalOffset.coerceIn(0, book.content.length)
+        pendingWindowSwitch = true
+        renderWindowForChapter(
+            index = targetIndex,
+            targetOffset = targetOffset,
+            preserveAnchor = true,
+            followUpDelta = delta.sign * POST_WINDOW_SWITCH_SCROLL,
+        )
+        return true
     }
 
     private fun focusReader() {
@@ -781,6 +820,11 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     }
 
     private fun handleBoundaryWheel(event: MouseWheelEvent) {
+        val delta = event.wheelRotation.sign * POST_WINDOW_SWITCH_SCROLL
+        if (delta != 0 && switchRenderWindowIfNeeded(delta)) {
+            event.consume()
+            return
+        }
         updateCurrentChapterFromScroll()
     }
 
@@ -948,6 +992,8 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         private const val RENDER_CONTEXT_CHARS = 5000
         private const val VIEWPORT_ANCHOR_RATIO = 0.25
         private const val RIGHT_SELECTION_GUTTER = 28
+        private const val WINDOW_SWITCH_THRESHOLD_RATIO = 0.35
+        private const val POST_WINDOW_SWITCH_SCROLL = 120
         private const val BUTTON_STYLE_TEXT = "文字"
         private const val BUTTON_STYLE_ICON = "图标"
         private val chapterPrefix = Regex("""^第[0-9零〇一二两三四五六七八九十百千万]{1,12}[章节回卷集部篇]""")
