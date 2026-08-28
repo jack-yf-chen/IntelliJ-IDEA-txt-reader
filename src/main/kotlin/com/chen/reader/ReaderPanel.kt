@@ -715,10 +715,6 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
 
     private fun scrollBy(delta: Int, allowWindowSwitch: Boolean = true) {
         currentBook ?: return
-        if (allowWindowSwitch && switchRenderWindowIfNeeded(delta)) {
-            return
-        }
-
         val scrollBar = scrollPane.verticalScrollBar
         val maxScrollValue = (scrollBar.maximum - scrollBar.visibleAmount).coerceAtLeast(0)
         val currentValue = scrollBar.value
@@ -726,6 +722,10 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             0,
             maxScrollValue,
         )
+
+        if (allowWindowSwitch && nextValue == currentValue && switchRenderWindowIfNeeded(delta)) {
+            return
+        }
 
         scrollBar.value = nextValue
         stateService.state.scrollValue = nextValue
@@ -743,16 +743,22 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
 
         val scrollBar = scrollPane.verticalScrollBar
         val maxScrollValue = (scrollBar.maximum - scrollBar.visibleAmount).coerceAtLeast(0)
-        val threshold = (scrollBar.visibleAmount * WINDOW_SWITCH_THRESHOLD_RATIO).toInt().coerceAtLeast(JBUI.scale(120))
         val targetIndex = when {
-            delta > 0 && scrollBar.value >= maxScrollValue - threshold -> (window.chapterIndex + 1)
+            delta > 0 && scrollBar.value >= maxScrollValue - EDGE_SWITCH_TOLERANCE -> (window.chapterIndex + 1)
                 .takeIf { it <= book.chapters.lastIndex }
-            delta < 0 && scrollBar.value <= threshold -> (window.chapterIndex - 1)
+            delta < 0 && scrollBar.value <= EDGE_SWITCH_TOLERANCE -> (window.chapterIndex - 1)
                 .takeIf { it >= 0 }
             else -> null
         } ?: return false
 
-        val targetOffset = stateService.state.globalOffset.coerceIn(0, book.content.length)
+        val targetChapter = book.chapters[targetIndex]
+        val visibleOffset = viewportAnchorOffset()
+        val targetOffset = if (delta > 0) {
+            visibleOffset.coerceAtLeast(targetChapter.startOffset)
+        } else {
+            visibleOffset.coerceAtMost(targetChapter.endOffset)
+        }.coerceIn(0, book.content.length)
+
         pendingWindowSwitch = true
         renderWindowForChapter(
             index = targetIndex,
@@ -821,11 +827,12 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
 
     private fun handleBoundaryWheel(event: MouseWheelEvent) {
         val delta = event.wheelRotation.sign * POST_WINDOW_SWITCH_SCROLL
-        if (delta != 0 && switchRenderWindowIfNeeded(delta)) {
-            event.consume()
-            return
+        SwingUtilities.invokeLater {
+            updateCurrentChapterFromScroll()
+            if (delta != 0) {
+                switchRenderWindowIfNeeded(delta)
+            }
         }
-        updateCurrentChapterFromScroll()
     }
 
     private fun selectedFontFamily(): String = stateService.state.fontFamily ?: defaultFontFamily()
@@ -992,7 +999,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         private const val RENDER_CONTEXT_CHARS = 5000
         private const val VIEWPORT_ANCHOR_RATIO = 0.25
         private const val RIGHT_SELECTION_GUTTER = 28
-        private const val WINDOW_SWITCH_THRESHOLD_RATIO = 0.35
+        private const val EDGE_SWITCH_TOLERANCE = 2
         private const val POST_WINDOW_SWITCH_SCROLL = 120
         private const val BUTTON_STYLE_TEXT = "文字"
         private const val BUTTON_STYLE_ICON = "图标"
