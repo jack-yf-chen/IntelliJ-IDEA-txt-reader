@@ -502,24 +502,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         chapterSelector.selectedIndex = index
         chapterSelector.toolTipText = book.chapters[index].title
         updatingChapterSelector = false
-        ensureRenderWindowForOffset(index, offset)
         updateControls()
-    }
-
-    private fun ensureRenderWindowForOffset(chapterIndex: Int, offset: Int) {
-        val window = renderWindow ?: return
-        if (window.chapterIndex == chapterIndex || offset !in 0..(currentBook?.content?.length ?: 0)) {
-            return
-        }
-        if (pendingWindowSwitch) {
-            return
-        }
-
-        pendingWindowSwitch = true
-        SwingUtilities.invokeLater {
-            pendingWindowSwitch = false
-            renderWindowForChapter(chapterIndex, stateService.state.globalOffset, preserveAnchor = true)
-        }
     }
 
     private fun saveReadingAnchor(book: Book, chapterIndex: Int, offset: Int) {
@@ -583,6 +566,15 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         val viewport = scrollPane.viewport
         val anchorY = viewport.viewPosition.y + (viewport.height * VIEWPORT_ANCHOR_RATIO).toInt()
         val point = Point(JBUI.scale(4), anchorY)
+        val localOffset = textPane.viewToModel2D(point).coerceIn(0, textPane.document.length)
+        return (window.baseOffset + localOffset).coerceIn(0, currentBook?.content?.length ?: 0)
+    }
+
+    private fun viewportEdgeOffset(heightRatio: Double): Int {
+        val window = renderWindow ?: return 0
+        val viewport = scrollPane.viewport
+        val anchorY = viewport.viewPosition.y + (viewport.height * heightRatio).toInt()
+        val point = Point(JBUI.scale(4), anchorY.coerceAtLeast(0))
         val localOffset = textPane.viewToModel2D(point).coerceIn(0, textPane.document.length)
         return (window.baseOffset + localOffset).coerceIn(0, currentBook?.content?.length ?: 0)
     }
@@ -743,21 +735,17 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
 
         val scrollBar = scrollPane.verticalScrollBar
         val maxScrollValue = (scrollBar.maximum - scrollBar.visibleAmount).coerceAtLeast(0)
-        val targetIndex = when {
-            delta > 0 && scrollBar.value >= maxScrollValue - EDGE_SWITCH_TOLERANCE -> (window.chapterIndex + 1)
-                .takeIf { it <= book.chapters.lastIndex }
-            delta < 0 && scrollBar.value <= EDGE_SWITCH_TOLERANCE -> (window.chapterIndex - 1)
-                .takeIf { it >= 0 }
-            else -> null
-        } ?: return false
+        val reachedBottom = delta > 0 && scrollBar.value >= maxScrollValue - EDGE_SWITCH_TOLERANCE
+        val reachedTop = delta < 0 && scrollBar.value <= EDGE_SWITCH_TOLERANCE
+        if (!reachedBottom && !reachedTop) {
+            return false
+        }
 
-        val targetChapter = book.chapters[targetIndex]
-        val visibleOffset = viewportAnchorOffset()
-        val targetOffset = if (delta > 0) {
-            visibleOffset.coerceAtLeast(targetChapter.startOffset)
-        } else {
-            visibleOffset.coerceAtMost(targetChapter.endOffset)
-        }.coerceIn(0, book.content.length)
+        val targetOffset = viewportEdgeOffset(if (delta > 0) 0.92 else 0.08)
+        val targetIndex = chapterIndexForOffset(book, targetOffset)
+        if (targetIndex == window.chapterIndex) {
+            return false
+        }
 
         pendingWindowSwitch = true
         renderWindowForChapter(
