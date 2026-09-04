@@ -11,53 +11,19 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.util.ui.JBUI
-import java.awt.BorderLayout
-import java.awt.Color
-import java.awt.Cursor
-import java.awt.Dimension
-import java.awt.FlowLayout
-import java.awt.Font
-import java.awt.Graphics
-import java.awt.Graphics2D
-import java.awt.GraphicsEnvironment
-import java.awt.Point
-import java.awt.RenderingHints
-import java.awt.Toolkit
-import java.awt.event.ComponentAdapter
-import java.awt.event.ComponentEvent
-import java.awt.event.InputEvent
-import java.awt.event.KeyEvent
-import java.awt.event.MouseWheelEvent
+import java.awt.*
+import java.awt.event.*
 import java.awt.image.BufferedImage
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
-import java.util.WeakHashMap
-import kotlin.math.sign
-import javax.swing.AbstractAction
-import javax.swing.BorderFactory
-import javax.swing.JButton
-import javax.swing.JCheckBox
-import javax.swing.JComboBox
-import javax.swing.JComponent
-import javax.swing.Icon
-import javax.swing.DefaultListCellRenderer
-import javax.swing.JLabel
-import javax.swing.JList
-import javax.swing.JMenuItem
-import javax.swing.JPanel
-import javax.swing.JPopupMenu
-import javax.swing.JTextPane
-import javax.swing.KeyStroke
-import javax.swing.SwingUtilities
+import java.util.*
+import javax.swing.*
 import javax.swing.Timer
-import javax.swing.UIManager
 import javax.swing.event.PopupMenuEvent
 import javax.swing.event.PopupMenuListener
-import javax.swing.text.DefaultCaret
-import javax.swing.text.SimpleAttributeSet
-import javax.swing.text.StyleConstants
+import kotlin.math.sign
 
 class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     private val stateService = ReaderStateService.getInstance(project)
@@ -75,7 +41,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     private val themeSelector = JComboBox(readerThemes.map { it.name }.toTypedArray())
     private val widthSelector = JComboBox(widthModes.keys.toTypedArray())
     private val hideCursorCheckBox = JCheckBox("隐藏光标")
-    private val textPane = ReaderTextPane()
+    private val textPane = VirtualReaderPane()
     private val scrollPane = JBScrollPane(textPane)
     private val statusLabel = JLabel("未打开文件")
     private val defaultTextCursor = Cursor.getPredefinedCursor(Cursor.TEXT_CURSOR)
@@ -87,11 +53,8 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     private var updatingTextColorSelector = false
     private var updatingThemeSelector = false
     private var updatingWidthSelector = false
-    private var suppressBoundaryNavigation = false
     private var settingsVisible = false
     private var lastScrollValue = 0
-    private var renderWindow: RenderWindow? = null
-    private var pendingWindowSwitch = false
     private val relayoutTimer = Timer(160) { restoreViewportAfterRelayout() }.apply {
         isRepeats = false
     }
@@ -106,10 +69,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         initializeWidthSelector()
         hideCursorCheckBox.isSelected = stateService.state.hideCursor
 
-        textPane.isEditable = false
         textPane.isFocusable = true
-        textPane.caret = InvisibleCaret()
-        textPane.margin = JBUI.insets(14)
         textPane.border = BorderFactory.createEmptyBorder()
         textPane.componentPopupMenu = createSelectionPopupMenu()
         updateReaderStyle()
@@ -176,7 +136,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
                 updateStatus()
             }
         }
-        scrollPane.addMouseWheelListener(::handleBoundaryWheel)
+        scrollPane.addMouseWheelListener(::handleWheelScroll)
         scrollPane.viewport.addComponentListener(object : ComponentAdapter() {
             override fun componentResized(event: ComponentEvent) {
                 updateReaderInsets()
@@ -236,7 +196,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         dictionaryItem.addActionListener { openDictionaryLookup() }
         searchItem.addActionListener { openBrowserSearch() }
         copyItem.addActionListener {
-            textPane.copy()
+            textPane.copySelection()
             focusReader()
         }
 
@@ -355,7 +315,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             val preferredCharset = if (restoreState && state.filePath == path.toString()) state.charsetName else null
             val book = TxtBookLoader.load(path, preferredCharset)
             currentBook = book
-            renderWindow = null
+            textPane.setBook(book)
 
             state.filePath = path.toString()
             state.charsetName = book.charset.name()
@@ -400,92 +360,39 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             restoreScroll -> restoreOffset(book, chapter) ?: chapter.startOffset
             else -> chapter.startOffset
         }
-        renderWindowForChapter(index, targetOffset, alignEnd = scrollToBottom, preserveAnchor = restoreScroll)
+        scrollToGlobalOffset(targetOffset, alignEnd = scrollToBottom, preserveAnchor = restoreScroll)
         updateControls()
     }
 
-    private fun renderWindowForChapter(
-        index: Int,
+    private fun scrollToGlobalOffset(
         targetOffset: Int,
         alignEnd: Boolean = false,
         preserveAnchor: Boolean = false,
-        followUpDelta: Int = 0,
     ) {
         val book = currentBook ?: return
-        if (index !in book.chapters.indices) {
-            return
-        }
+        val scrollBar = scrollPane.verticalScrollBar
+        val maxScrollValue = (scrollBar.maximum - scrollBar.visibleAmount).coerceAtLeast(0)
+        val scrollValue = textPane.scrollValueForOffset(
+            targetOffset.coerceIn(0, book.content.length),
+            viewportHeight = scrollPane.viewport.height,
+            alignEnd = alignEnd,
+            preserveAnchor = preserveAnchor,
+            anchorRatio = VIEWPORT_ANCHOR_RATIO,
+        ).coerceIn(0, maxScrollValue)
 
-        suppressBoundaryNavigation = true
-        val window = createRenderWindow(book, index)
-        if (renderWindow != window) {
-            renderWindow = window
-            textPane.text = window.text
-            applyParagraphStyle()
-            textPane.caretPosition = 0
-        }
-
-        SwingUtilities.invokeLater {
-            pendingWindowSwitch = false
-            val scrollBar = scrollPane.verticalScrollBar
-            val maxScrollValue = (scrollBar.maximum - scrollBar.visibleAmount).coerceAtLeast(0)
-            val scrollValue = scrollValueForGlobalOffset(targetOffset, alignEnd, preserveAnchor).coerceIn(0, maxScrollValue)
-            scrollPane.verticalScrollBar.value = scrollValue
-            lastScrollValue = scrollValue
-            stateService.state.scrollValue = scrollValue
-            suppressBoundaryNavigation = false
-            updateReadingPositionForGlobalOffset(viewportAnchorOffset())
-            if (followUpDelta != 0) {
-                scrollBy(followUpDelta, allowWindowSwitch = false)
-            }
-            focusReader()
-            updateStatus()
-        }
-    }
-
-    private fun createRenderWindow(book: Book, chapterIndex: Int): RenderWindow {
-        val chapter = book.chapters[chapterIndex]
-        val baseOffset = (chapter.startOffset - RENDER_CONTEXT_CHARS).coerceAtLeast(0)
-        val endOffset = (chapter.endOffset + RENDER_CONTEXT_CHARS).coerceAtMost(book.content.length)
-        return RenderWindow(
-            chapterIndex = chapterIndex,
-            baseOffset = baseOffset,
-            endOffset = endOffset,
-            text = book.content.substring(baseOffset, endOffset),
-        )
-    }
-
-    private fun scrollValueForGlobalOffset(offset: Int, alignEnd: Boolean, preserveAnchor: Boolean = false): Int {
-        val window = renderWindow ?: return 0
-        return scrollValueForLocalOffset(offset - window.baseOffset, alignEnd, preserveAnchor)
-    }
-
-    private fun scrollValueForLocalOffset(offset: Int, alignEnd: Boolean, preserveAnchor: Boolean): Int {
-        val documentLength = textPane.document.length
-        val safeOffset = offset.coerceIn(0, documentLength)
-        val viewBounds = textPane.modelToView2D(safeOffset)?.bounds ?: return 0
-        return if (alignEnd) {
-            viewBounds.y - scrollPane.verticalScrollBar.visibleAmount + viewBounds.height + JBUI.scale(24)
-        } else if (preserveAnchor) {
-            viewBounds.y - (scrollPane.viewport.height * VIEWPORT_ANCHOR_RATIO).toInt()
-        } else {
-            viewBounds.y
-        }
+        scrollBar.value = scrollValue
+        lastScrollValue = scrollValue
+        stateService.state.scrollValue = scrollValue
+        updateReadingPositionForGlobalOffset(viewportAnchorOffset())
+        focusReader()
+        updateStatus()
     }
 
     private fun updateCurrentChapterFromScroll() {
-        if (suppressBoundaryNavigation) {
-            return
-        }
-
         updateReadingPositionFromViewport()
     }
 
     private fun updateReadingPositionFromViewport() {
-        if (suppressBoundaryNavigation) {
-            return
-        }
-
         updateReadingPositionForGlobalOffset(viewportAnchorOffset())
     }
 
@@ -562,21 +469,8 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     }
 
     private fun viewportAnchorOffset(): Int {
-        val window = renderWindow ?: return 0
         val viewport = scrollPane.viewport
-        val anchorY = viewport.viewPosition.y + (viewport.height * VIEWPORT_ANCHOR_RATIO).toInt()
-        val point = Point(JBUI.scale(4), anchorY)
-        val localOffset = textPane.viewToModel2D(point).coerceIn(0, textPane.document.length)
-        return (window.baseOffset + localOffset).coerceIn(0, currentBook?.content?.length ?: 0)
-    }
-
-    private fun viewportEdgeOffset(heightRatio: Double): Int {
-        val window = renderWindow ?: return 0
-        val viewport = scrollPane.viewport
-        val anchorY = viewport.viewPosition.y + (viewport.height * heightRatio).toInt()
-        val point = Point(JBUI.scale(4), anchorY.coerceAtLeast(0))
-        val localOffset = textPane.viewToModel2D(point).coerceIn(0, textPane.document.length)
-        return (window.baseOffset + localOffset).coerceIn(0, currentBook?.content?.length ?: 0)
+        return textPane.offsetAtY(viewport.viewPosition.y + (viewport.height * VIEWPORT_ANCHOR_RATIO).toInt())
     }
 
     private fun updateChapterSelector(chapters: List<Chapter>) {
@@ -599,29 +493,27 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     }
 
     private fun updateReaderStyle() {
-        textPane.font = Font(selectedFontFamily(), Font.PLAIN, stateService.state.fontSize)
         applyTheme()
         updateReaderInsets()
-        applyParagraphStyle()
+        textPane.updateReaderStyle(
+            font = Font(selectedFontFamily(), Font.PLAIN, stateService.state.fontSize),
+            foreground = selectedForegroundColor(),
+            lineSpacingPercent = stateService.state.lineSpacingPercent,
+        )
         updateStatus()
         scheduleRelayoutRestore()
-    }
-
-    private fun applyParagraphStyle() {
-        val document = textPane.styledDocument
-        val attributes = SimpleAttributeSet()
-        StyleConstants.setLineSpacing(attributes, stateService.state.lineSpacingPercent / 100f)
-        document.setParagraphAttributes(0, document.length, attributes, false)
     }
 
     private fun applyTheme() {
         val theme = selectedTheme()
         val background = theme.background ?: UIManager.getColor("TextArea.background")
-        val foreground = selectedTextColor() ?: theme.foreground ?: UIManager.getColor("TextArea.foreground")
         textPane.background = background
-        textPane.foreground = foreground
-        textPane.caretColor = foreground
         scrollPane.viewport.background = background
+    }
+
+    private fun selectedForegroundColor(): Color {
+        val theme = selectedTheme()
+        return selectedTextColor() ?: theme.foreground ?: UIManager.getColor("TextArea.foreground")
     }
 
     private fun updateReaderInsets() {
@@ -634,11 +526,11 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             ((viewportWidth - JBUI.scale(maxContentWidth)) / 2).coerceAtLeast(base)
         }
         val rightInset = sideInset + JBUI.scale(RIGHT_SELECTION_GUTTER)
-        textPane.margin = JBUI.insets(base, sideInset, base, rightInset)
+        textPane.updateContentInsets(Insets(base, sideInset, base, rightInset))
     }
 
     private fun scheduleRelayoutRestore() {
-        if (currentBook == null || renderWindow == null) {
+        if (currentBook == null) {
             return
         }
         relayoutTimer.restart()
@@ -647,14 +539,11 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     private fun restoreViewportAfterRelayout() {
         val book = currentBook ?: return
         val targetOffset = stateService.state.globalOffset.coerceIn(0, book.content.length)
-        val chapterIndex = chapterIndexForOffset(book, targetOffset)
-        renderWindowForChapter(chapterIndex, targetOffset, preserveAnchor = true)
+        scrollToGlobalOffset(targetOffset, preserveAnchor = true)
     }
 
     private fun updateCursorMode() {
         textPane.cursor = if (stateService.state.hideCursor) hiddenCursor else defaultTextCursor
-        textPane.caret.isVisible = false
-        textPane.caret.isSelectionVisible = true
     }
 
     private fun installKeyboardShortcuts() {
@@ -705,7 +594,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         scrollBy(delta * direction)
     }
 
-    private fun scrollBy(delta: Int, allowWindowSwitch: Boolean = true) {
+    private fun scrollBy(delta: Int) {
         currentBook ?: return
         val scrollBar = scrollPane.verticalScrollBar
         val maxScrollValue = (scrollBar.maximum - scrollBar.visibleAmount).coerceAtLeast(0)
@@ -715,46 +604,11 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             maxScrollValue,
         )
 
-        if (allowWindowSwitch && nextValue == currentValue && switchRenderWindowIfNeeded(delta)) {
-            return
-        }
-
         scrollBar.value = nextValue
         stateService.state.scrollValue = nextValue
         lastScrollValue = nextValue
         updateCurrentChapterFromScroll()
         updateStatus()
-    }
-
-    private fun switchRenderWindowIfNeeded(delta: Int): Boolean {
-        val book = currentBook ?: return false
-        val window = renderWindow ?: return false
-        if (delta == 0 || pendingWindowSwitch || suppressBoundaryNavigation) {
-            return false
-        }
-
-        val scrollBar = scrollPane.verticalScrollBar
-        val maxScrollValue = (scrollBar.maximum - scrollBar.visibleAmount).coerceAtLeast(0)
-        val reachedBottom = delta > 0 && scrollBar.value >= maxScrollValue - EDGE_SWITCH_TOLERANCE
-        val reachedTop = delta < 0 && scrollBar.value <= EDGE_SWITCH_TOLERANCE
-        if (!reachedBottom && !reachedTop) {
-            return false
-        }
-
-        val targetOffset = viewportEdgeOffset(if (delta > 0) 0.92 else 0.08)
-        val targetIndex = chapterIndexForOffset(book, targetOffset)
-        if (targetIndex == window.chapterIndex) {
-            return false
-        }
-
-        pendingWindowSwitch = true
-        renderWindowForChapter(
-            index = targetIndex,
-            targetOffset = targetOffset,
-            preserveAnchor = true,
-            followUpDelta = delta.sign * POST_WINDOW_SWITCH_SCROLL,
-        )
-        return true
     }
 
     private fun focusReader() {
@@ -800,7 +654,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     }
 
     private fun selectedLookupText(maxLength: Int = MAX_TRANSLATION_SELECTION_LENGTH): String? {
-        val normalizedText = textPane.selectedText
+        val normalizedText = textPane.selectedText()
             ?.replace(whitespaceRegex, " ")
             ?.trim()
             ?: return null
@@ -813,13 +667,9 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         return URLEncoder.encode(text, StandardCharsets.UTF_8).replace("+", "%20")
     }
 
-    private fun handleBoundaryWheel(event: MouseWheelEvent) {
-        val delta = event.wheelRotation.sign * POST_WINDOW_SWITCH_SCROLL
+    private fun handleWheelScroll(event: MouseWheelEvent) {
         SwingUtilities.invokeLater {
             updateCurrentChapterFromScroll()
-            if (delta != 0) {
-                switchRenderWindowIfNeeded(delta)
-            }
         }
     }
 
@@ -984,11 +834,8 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         private const val MAX_TRANSLATION_SELECTION_LENGTH = 500
         private const val ANCHOR_TEXT_LENGTH = 80
         private const val ANCHOR_SEARCH_RADIUS = 3000
-        private const val RENDER_CONTEXT_CHARS = 5000
         private const val VIEWPORT_ANCHOR_RATIO = 0.25
         private const val RIGHT_SELECTION_GUTTER = 28
-        private const val EDGE_SWITCH_TOLERANCE = 2
-        private const val POST_WINDOW_SWITCH_SCROLL = 120
         private const val BUTTON_STYLE_TEXT = "文字"
         private const val BUTTON_STYLE_ICON = "图标"
         private val chapterPrefix = Regex("""^第[0-9零〇一二两三四五六七八九十百千万]{1,12}[章节回卷集部篇]""")
@@ -1019,13 +866,6 @@ private data class ReaderTheme(
     val name: String,
     val background: Color?,
     val foreground: Color?,
-)
-
-private data class RenderWindow(
-    val chapterIndex: Int,
-    val baseOffset: Int,
-    val endOffset: Int,
-    val text: String,
 )
 
 private enum class ButtonIconKind {
@@ -1107,19 +947,319 @@ private class ReaderButtonIcon(private val kind: ButtonIconKind) : Icon {
     }
 }
 
-private class ReaderTextPane : JTextPane() {
-    override fun getScrollableTracksViewportWidth(): Boolean = true
-}
+private class VirtualReaderPane : JComponent(), Scrollable {
+    private var book: Book? = null
+    private var lines: List<VirtualLine> = emptyList()
+    private var contentInsets: Insets = JBUI.insets(14)
+    private var lineHeight = JBUI.scale(28)
+    private var ascent = JBUI.scale(20)
+    private var foregroundColor = UIManager.getColor("TextArea.foreground")
+    private var lineSpacingPercent = 20
+    private var selectionStart: Int? = null
+    private var selectionEnd: Int? = null
 
-private class InvisibleCaret : DefaultCaret() {
-    override fun paint(graphics: Graphics?) = Unit
-
-    override fun setVisible(visible: Boolean) {
-        super.setVisible(false)
+    init {
+        background = UIManager.getColor("TextArea.background")
+        foreground = foregroundColor
+        isOpaque = true
+        installSelectionHandlers()
     }
 
-    override fun isVisible(): Boolean = false
+    fun setBook(book: Book) {
+        this.book = book
+        clearSelection()
+        rebuildLayout()
+    }
+
+    fun updateReaderStyle(font: Font, foreground: Color, lineSpacingPercent: Int) {
+        this.font = font
+        this.foregroundColor = foreground
+        this.foreground = foreground
+        this.lineSpacingPercent = lineSpacingPercent
+        rebuildLayout()
+    }
+
+    fun updateContentInsets(insets: Insets) {
+        contentInsets = insets
+        rebuildLayout()
+    }
+
+    fun offsetAtY(y: Int): Int {
+        val currentBook = book ?: return 0
+        if (lines.isEmpty()) {
+            return 0
+        }
+
+        val index = lineIndexForY(y)
+        val line = lines[index]
+        return line.startOffset.coerceIn(0, currentBook.content.length)
+    }
+
+    fun scrollValueForOffset(
+        offset: Int,
+        viewportHeight: Int,
+        alignEnd: Boolean,
+        preserveAnchor: Boolean,
+        anchorRatio: Double,
+    ): Int {
+        val line = lineForOffset(offset)
+        val lineTop = line?.y ?: contentInsets.top
+        return when {
+            alignEnd -> lineTop - viewportHeight + lineHeight + JBUI.scale(24)
+            preserveAnchor -> lineTop - (viewportHeight * anchorRatio).toInt()
+            else -> lineTop
+        }
+    }
+
+    fun selectedText(): String? {
+        val currentBook = book ?: return null
+        val start = selectionStart ?: return null
+        val end = selectionEnd ?: return null
+        val from = minOf(start, end).coerceIn(0, currentBook.content.length)
+        val to = maxOf(start, end).coerceIn(0, currentBook.content.length)
+        if (from == to) {
+            return null
+        }
+        return currentBook.content.substring(from, to)
+    }
+
+    fun copySelection() {
+        val text = selectedText() ?: return
+        Toolkit.getDefaultToolkit().systemClipboard.setContents(
+            java.awt.datatransfer.StringSelection(text),
+            null,
+        )
+    }
+
+    override fun paintComponent(graphics: Graphics) {
+        super.paintComponent(graphics)
+        val currentBook = book ?: return
+        val g = graphics.create() as Graphics2D
+        try {
+            g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON)
+            g.font = font
+
+            val clipTop = g.clipBounds.y
+            val clipBottom = clipTop + g.clipBounds.height
+            val startIndex = lineIndexForY((clipTop - lineHeight).coerceAtLeast(0))
+            val endIndex = lineIndexForY(clipBottom + lineHeight)
+
+            paintSelection(g, startIndex, endIndex)
+            g.color = foregroundColor
+            for (index in startIndex..endIndex) {
+                val line = lines.getOrNull(index) ?: continue
+                if (line.endOffset <= line.startOffset) {
+                    continue
+                }
+                val text = currentBook.content.substring(line.startOffset, line.endOffset)
+                g.drawString(text, contentInsets.left, line.y + ascent)
+            }
+        } finally {
+            g.dispose()
+        }
+    }
+
+    override fun getPreferredSize(): Dimension {
+        val lineCount = lines.size.coerceAtLeast(1)
+        val height = contentInsets.top + contentInsets.bottom + lineCount * lineHeight
+        return Dimension(parent?.width ?: JBUI.scale(800), height)
+    }
+
+    override fun getPreferredScrollableViewportSize(): Dimension = preferredSize
+
+    override fun getScrollableUnitIncrement(visibleRect: Rectangle, orientation: Int, direction: Int): Int {
+        return lineHeight.coerceAtLeast(JBUI.scale(24))
+    }
+
+    override fun getScrollableBlockIncrement(visibleRect: Rectangle, orientation: Int, direction: Int): Int {
+        return (visibleRect.height * 0.86).toInt().coerceAtLeast(lineHeight)
+    }
+
+    override fun getScrollableTracksViewportWidth(): Boolean = true
+
+    override fun getScrollableTracksViewportHeight(): Boolean = false
+
+    private fun rebuildLayout() {
+        val currentBook = book
+        val metrics = getFontMetrics(font ?: UIManager.getFont("TextArea.font"))
+        ascent = metrics.ascent
+        lineHeight = (metrics.height * (1f + lineSpacingPercent / 100f)).toInt().coerceAtLeast(metrics.height)
+
+        lines = if (currentBook == null) {
+            emptyList()
+        } else {
+            layoutContent(currentBook.content, metrics)
+        }
+
+        revalidate()
+        repaint()
+    }
+
+    private fun layoutContent(content: String, metrics: FontMetrics): List<VirtualLine> {
+        if (content.isEmpty()) {
+            return listOf(VirtualLine(0, 0, contentInsets.top))
+        }
+
+        val result = mutableListOf<VirtualLine>()
+        val availableWidth = width
+            .takeIf { it > 0 }
+            ?: (parent as? JViewport)?.width
+            ?: JBUI.scale(800)
+        val maxWidth = (availableWidth - contentInsets.left - contentInsets.right).coerceAtLeast(JBUI.scale(120))
+        var lineStart = 0
+        var index = 0
+        var currentWidth = 0
+
+        fun addLine(endOffset: Int) {
+            val y = contentInsets.top + result.size * lineHeight
+            result.add(VirtualLine(lineStart, endOffset.coerceAtLeast(lineStart), y))
+        }
+
+        while (index < content.length) {
+            val char = content[index]
+            if (char == '\r') {
+                index++
+                continue
+            }
+            if (char == '\n') {
+                addLine(index)
+                index++
+                lineStart = index
+                currentWidth = 0
+                continue
+            }
+
+            val charWidth = metrics.charWidth(char).coerceAtLeast(1)
+            if (currentWidth > 0 && currentWidth + charWidth > maxWidth) {
+                addLine(index)
+                lineStart = index
+                currentWidth = 0
+                continue
+            }
+            currentWidth += charWidth
+            index++
+        }
+
+        addLine(content.length)
+        return result
+    }
+
+    private fun installSelectionHandlers() {
+        addMouseListener(object : MouseAdapter() {
+            override fun mousePressed(event: MouseEvent) {
+                if (SwingUtilities.isLeftMouseButton(event)) {
+                    val offset = offsetAtPoint(event.point)
+                    selectionStart = offset
+                    selectionEnd = offset
+                    requestFocusInWindow()
+                    repaint()
+                }
+            }
+
+            override fun mouseReleased(event: MouseEvent) {
+                if (SwingUtilities.isLeftMouseButton(event)) {
+                    selectionEnd = offsetAtPoint(event.point)
+                    repaint()
+                }
+            }
+        })
+        addMouseMotionListener(object : MouseMotionAdapter() {
+            override fun mouseDragged(event: MouseEvent) {
+                selectionEnd = offsetAtPoint(event.point)
+                repaint()
+            }
+        })
+    }
+
+    private fun clearSelection() {
+        selectionStart = null
+        selectionEnd = null
+        repaint()
+    }
+
+    private fun paintSelection(g: Graphics2D, startIndex: Int, endIndex: Int) {
+        val currentBook = book ?: return
+        val start = selectionStart ?: return
+        val end = selectionEnd ?: return
+        val from = minOf(start, end).coerceIn(0, currentBook.content.length)
+        val to = maxOf(start, end).coerceIn(0, currentBook.content.length)
+        if (from == to) {
+            return
+        }
+
+        val selectionColor = UIManager.getColor("TextArea.selectionBackground") ?: Color(0x4A6FA5)
+        g.color = selectionColor
+        for (index in startIndex..endIndex) {
+            val line = lines.getOrNull(index) ?: continue
+            val selectedStart = maxOf(from, line.startOffset)
+            val selectedEnd = minOf(to, line.endOffset)
+            if (selectedStart >= selectedEnd) {
+                continue
+            }
+            val x = contentInsets.left + textWidth(currentBook.content, line.startOffset, selectedStart)
+            val width = textWidth(currentBook.content, selectedStart, selectedEnd).coerceAtLeast(JBUI.scale(2))
+            g.fillRect(x, line.y, width, lineHeight)
+        }
+    }
+
+    private fun offsetAtPoint(point: Point): Int {
+        val currentBook = book ?: return 0
+        if (lines.isEmpty()) {
+            return 0
+        }
+        val line = lines[lineIndexForY(point.y)]
+        val x = (point.x - contentInsets.left).coerceAtLeast(0)
+        var offset = line.startOffset
+        var width = 0
+        while (offset < line.endOffset) {
+            val charWidth = getFontMetrics(font).charWidth(currentBook.content[offset]).coerceAtLeast(1)
+            if (x < width + charWidth / 2) {
+                break
+            }
+            width += charWidth
+            offset++
+        }
+        return offset.coerceIn(0, currentBook.content.length)
+    }
+
+    private fun lineIndexForY(y: Int): Int {
+        if (lines.isEmpty()) {
+            return 0
+        }
+        return ((y - contentInsets.top) / lineHeight).coerceIn(0, lines.lastIndex)
+    }
+
+    private fun lineForOffset(offset: Int): VirtualLine? {
+        if (lines.isEmpty()) {
+            return null
+        }
+        val index = lines.binarySearch {
+            when {
+                offset < it.startOffset -> 1
+                offset > it.endOffset -> -1
+                else -> 0
+            }
+        }
+        if (index >= 0) {
+            return lines[index]
+        }
+        val insertionPoint = -index - 1
+        return lines.getOrNull((insertionPoint - 1).coerceIn(0, lines.lastIndex))
+    }
+
+    private fun textWidth(content: String, start: Int, end: Int): Int {
+        if (start >= end) {
+            return 0
+        }
+        return getFontMetrics(font).stringWidth(content.substring(start, end))
+    }
 }
+
+private data class VirtualLine(
+    val startOffset: Int,
+    val endOffset: Int,
+    val y: Int,
+)
 
 private fun createHiddenCursor(): Cursor {
     val image = BufferedImage(16, 16, BufferedImage.TYPE_INT_ARGB)
