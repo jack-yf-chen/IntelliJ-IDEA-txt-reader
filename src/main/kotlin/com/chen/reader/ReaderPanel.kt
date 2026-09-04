@@ -170,6 +170,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         mainRow.add(nextButton)
         mainRow.add(settingsButton)
 
+        settingsPanel.add(boldTextCheckBox)
         settingsPanel.add(smallerButton)
         settingsPanel.add(largerButton)
         settingsPanel.add(tighterLineButton)
@@ -178,7 +179,6 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         settingsPanel.add(textColorSelector)
         settingsPanel.add(themeSelector)
         settingsPanel.add(widthSelector)
-        settingsPanel.add(boldTextCheckBox)
         settingsPanel.add(hideCursorCheckBox)
         settingsPanel.isVisible = false
         settingsPanel.name = SETTINGS_PANEL_NAME
@@ -767,6 +767,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         configureButton(openButton, "打开", ReaderButtonIcon(ButtonIconKind.OPEN), "打开 TXT 文件", useIcons)
         configureButton(previousButton, "上一章", ReaderButtonIcon(ButtonIconKind.PREVIOUS), "上一章", useIcons)
         configureButton(nextButton, "下一章", ReaderButtonIcon(ButtonIconKind.NEXT), "下一章", useIcons)
+        configureToggleButton(boldTextCheckBox, "加粗", ReaderButtonIcon(ButtonIconKind.BOLD), "加粗正文", useIcons)
         configureButton(smallerButton, "A-", ReaderButtonIcon(ButtonIconKind.FONT_SMALLER), "减小字号", useIcons)
         configureButton(largerButton, "A+", ReaderButtonIcon(ButtonIconKind.FONT_LARGER), "增大字号", useIcons)
         configureButton(tighterLineButton, "行距-", ReaderButtonIcon(ButtonIconKind.LINE_TIGHTER), "减小行距", useIcons)
@@ -786,6 +787,24 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         button.toolTipText = tooltip
         button.text = if (useIcons) null else text
         button.icon = if (useIcons) icon else null
+        button.preferredSize = if (useIcons) {
+            Dimension(JBUI.scale(34), button.preferredSize.height)
+        } else {
+            null
+        }
+    }
+
+    private fun configureToggleButton(
+        button: JCheckBox,
+        text: String,
+        icon: Icon,
+        tooltip: String,
+        useIcons: Boolean,
+    ) {
+        button.toolTipText = tooltip
+        button.text = if (useIcons) null else text
+        button.icon = if (useIcons) icon else null
+        button.selectedIcon = if (useIcons) icon else null
         button.preferredSize = if (useIcons) {
             Dimension(JBUI.scale(34), button.preferredSize.height)
         } else {
@@ -897,6 +916,7 @@ private enum class ButtonIconKind {
     OPEN,
     PREVIOUS,
     NEXT,
+    BOLD,
     FONT_SMALLER,
     FONT_LARGER,
     LINE_TIGHTER,
@@ -922,6 +942,7 @@ private class ReaderButtonIcon(private val kind: ButtonIconKind) : Icon {
                 ButtonIconKind.OPEN -> paintOpen(g, x, y)
                 ButtonIconKind.PREVIOUS -> paintArrow(g, x, y, left = true)
                 ButtonIconKind.NEXT -> paintArrow(g, x, y, left = false)
+                ButtonIconKind.BOLD -> paintText(g, x, y, "B")
                 ButtonIconKind.FONT_SMALLER -> paintText(g, x, y, "A-")
                 ButtonIconKind.FONT_LARGER -> paintText(g, x, y, "A+")
                 ButtonIconKind.LINE_TIGHTER -> paintLines(g, x, y, tight = true)
