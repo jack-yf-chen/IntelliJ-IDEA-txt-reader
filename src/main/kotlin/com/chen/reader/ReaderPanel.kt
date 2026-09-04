@@ -23,7 +23,6 @@ import javax.swing.*
 import javax.swing.Timer
 import javax.swing.event.PopupMenuEvent
 import javax.swing.event.PopupMenuListener
-import kotlin.math.sign
 
 class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     private val stateService = ReaderStateService.getInstance(project)
@@ -40,6 +39,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     private val textColorSelector = JComboBox(textColors.keys.toTypedArray())
     private val themeSelector = JComboBox(readerThemes.map { it.name }.toTypedArray())
     private val widthSelector = JComboBox(widthModes.keys.toTypedArray())
+    private val boldTextCheckBox = JCheckBox("加粗")
     private val hideCursorCheckBox = JCheckBox("隐藏光标")
     private val textPane = VirtualReaderPane()
     private val scrollPane = JBScrollPane(textPane)
@@ -55,6 +55,8 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     private var updatingWidthSelector = false
     private var settingsVisible = false
     private var lastScrollValue = 0
+    private var layoutRestoring = false
+    private var relayoutAnchorOffset: Int? = null
     private val relayoutTimer = Timer(160) { restoreViewportAfterRelayout() }.apply {
         isRepeats = false
     }
@@ -67,6 +69,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         initializeTextColorSelector()
         initializeThemeSelector()
         initializeWidthSelector()
+        boldTextCheckBox.isSelected = stateService.state.boldText
         hideCursorCheckBox.isSelected = stateService.state.hideCursor
 
         textPane.isFocusable = true
@@ -113,9 +116,15 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         widthSelector.addActionListener {
             if (!updatingWidthSelector) {
                 stateService.state.widthMode = widthSelector.selectedItem as String
+                scheduleRelayoutRestore()
                 updateReaderInsets()
                 focusReader()
             }
+        }
+        boldTextCheckBox.addActionListener {
+            stateService.state.boldText = boldTextCheckBox.isSelected
+            updateReaderStyle()
+            focusReader()
         }
         hideCursorCheckBox.addActionListener {
             stateService.state.hideCursor = hideCursorCheckBox.isSelected
@@ -130,6 +139,9 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
 
         scrollPane.verticalScrollBar.addAdjustmentListener {
             if (!it.valueIsAdjusting) {
+                if (layoutRestoring) {
+                    return@addAdjustmentListener
+                }
                 stateService.state.scrollValue = it.value
                 lastScrollValue = it.value
                 updateReadingPositionFromViewport()
@@ -139,8 +151,8 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         scrollPane.addMouseWheelListener(::handleWheelScroll)
         scrollPane.viewport.addComponentListener(object : ComponentAdapter() {
             override fun componentResized(event: ComponentEvent) {
-                updateReaderInsets()
                 scheduleRelayoutRestore()
+                updateReaderInsets()
             }
         })
 
@@ -166,6 +178,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         settingsPanel.add(textColorSelector)
         settingsPanel.add(themeSelector)
         settingsPanel.add(widthSelector)
+        settingsPanel.add(boldTextCheckBox)
         settingsPanel.add(hideCursorCheckBox)
         settingsPanel.isVisible = false
         settingsPanel.name = SETTINGS_PANEL_NAME
@@ -493,15 +506,15 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     }
 
     private fun updateReaderStyle() {
+        scheduleRelayoutRestore()
         applyTheme()
         updateReaderInsets()
         textPane.updateReaderStyle(
-            font = Font(selectedFontFamily(), Font.PLAIN, stateService.state.fontSize),
+            font = Font(selectedFontFamily(), selectedFontStyle(), stateService.state.fontSize),
             foreground = selectedForegroundColor(),
             lineSpacingPercent = stateService.state.lineSpacingPercent,
         )
         updateStatus()
-        scheduleRelayoutRestore()
     }
 
     private fun applyTheme() {
@@ -533,13 +546,21 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         if (currentBook == null) {
             return
         }
+        if (relayoutAnchorOffset == null) {
+            relayoutAnchorOffset = viewportAnchorOffset()
+        }
+        layoutRestoring = true
         relayoutTimer.restart()
     }
 
     private fun restoreViewportAfterRelayout() {
         val book = currentBook ?: return
-        val targetOffset = stateService.state.globalOffset.coerceIn(0, book.content.length)
-        scrollToGlobalOffset(targetOffset, preserveAnchor = true)
+        val targetOffset = (relayoutAnchorOffset ?: stateService.state.globalOffset).coerceIn(0, book.content.length)
+        relayoutAnchorOffset = null
+        SwingUtilities.invokeLater {
+            scrollToGlobalOffset(targetOffset, preserveAnchor = true)
+            layoutRestoring = false
+        }
     }
 
     private fun updateCursorMode() {
@@ -675,6 +696,8 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
 
     private fun selectedFontFamily(): String = stateService.state.fontFamily ?: defaultFontFamily()
 
+    private fun selectedFontStyle(): Int = if (stateService.state.boldText) Font.BOLD else Font.PLAIN
+
     private fun updateControls() {
         val book = currentBook
         val hasBook = book != null
@@ -690,6 +713,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         fontSelector.isEnabled = true
         themeSelector.isEnabled = true
         widthSelector.isEnabled = true
+        boldTextCheckBox.isEnabled = true
         hideCursorCheckBox.isEnabled = true
 
         updateStatus()

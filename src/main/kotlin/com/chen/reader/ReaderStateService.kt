@@ -36,6 +36,7 @@ class ReaderState {
     var progressInChapterPermille: Int = 0
     var fontSize: Int = 18
     var fontFamily: String? = null
+    var boldText: Boolean = false
     var textColorName: String = "跟随主题"
     var lineSpacingPercent: Int = 20
     var themeName: String = "跟随 IDE"
