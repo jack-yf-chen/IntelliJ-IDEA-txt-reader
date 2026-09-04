@@ -39,7 +39,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     private val textColorSelector = JComboBox(textColors.keys.toTypedArray())
     private val themeSelector = JComboBox(readerThemes.map { it.name }.toTypedArray())
     private val widthSelector = JComboBox(widthModes.keys.toTypedArray())
-    private val boldTextCheckBox = JCheckBox("加粗")
+    private val fontWeightSelector = JComboBox(fontWeights.map { it.name }.toTypedArray())
     private val hideCursorCheckBox = JCheckBox("隐藏光标")
     private val textPane = VirtualReaderPane()
     private val scrollPane = JBScrollPane(textPane)
@@ -53,6 +53,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     private var updatingTextColorSelector = false
     private var updatingThemeSelector = false
     private var updatingWidthSelector = false
+    private var updatingFontWeightSelector = false
     private var settingsVisible = false
     private var lastScrollValue = 0
     private var layoutRestoring = false
@@ -69,7 +70,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         initializeTextColorSelector()
         initializeThemeSelector()
         initializeWidthSelector()
-        boldTextCheckBox.isSelected = stateService.state.boldText
+        initializeFontWeightSelector()
         hideCursorCheckBox.isSelected = stateService.state.hideCursor
 
         textPane.isFocusable = true
@@ -121,10 +122,13 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
                 focusReader()
             }
         }
-        boldTextCheckBox.addActionListener {
-            stateService.state.boldText = boldTextCheckBox.isSelected
-            updateReaderStyle()
-            focusReader()
+        fontWeightSelector.addActionListener {
+            if (!updatingFontWeightSelector) {
+                stateService.state.fontWeightName = fontWeightSelector.selectedItem as String
+                stateService.state.boldText = selectedFontWeight().style == Font.BOLD
+                updateReaderStyle()
+                focusReader()
+            }
         }
         hideCursorCheckBox.addActionListener {
             stateService.state.hideCursor = hideCursorCheckBox.isSelected
@@ -170,7 +174,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         mainRow.add(nextButton)
         mainRow.add(settingsButton)
 
-        settingsPanel.add(boldTextCheckBox)
+        settingsPanel.add(fontWeightSelector)
         settingsPanel.add(smallerButton)
         settingsPanel.add(largerButton)
         settingsPanel.add(tighterLineButton)
@@ -192,6 +196,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         textColorSelector.preferredSize = Dimension(JBUI.scale(100), textColorSelector.preferredSize.height)
         themeSelector.preferredSize = Dimension(JBUI.scale(100), themeSelector.preferredSize.height)
         widthSelector.preferredSize = Dimension(JBUI.scale(80), widthSelector.preferredSize.height)
+        fontWeightSelector.preferredSize = Dimension(JBUI.scale(80), fontWeightSelector.preferredSize.height)
 
         toolbar.add(mainRow, BorderLayout.NORTH)
         toolbar.add(settingsPanel, BorderLayout.CENTER)
@@ -313,6 +318,21 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             widthSelector.selectedItem = widthMode
             updatingWidthSelector = false
         }
+    }
+
+    private fun initializeFontWeightSelector() {
+        val state = stateService.state
+        val weightName = when {
+            state.fontWeightName.isNotBlank() -> state.fontWeightName
+            state.boldText -> "加粗"
+            else -> "标准"
+        }
+        val normalizedWeightName = weightName.takeIf { fontWeights.any { weight -> weight.name == it } } ?: "标准"
+        updatingFontWeightSelector = true
+        fontWeightSelector.selectedItem = normalizedWeightName
+        updatingFontWeightSelector = false
+        state.fontWeightName = normalizedWeightName
+        state.boldText = selectedFontWeight().style == Font.BOLD
     }
 
     fun restoreLastBook() {
@@ -510,9 +530,10 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         applyTheme()
         updateReaderInsets(rebuildLayout = false)
         textPane.updateReaderStyle(
-            font = Font(selectedFontFamily(), selectedFontStyle(), stateService.state.fontSize),
+            font = Font(selectedFontFamily(), selectedFontWeight().style, stateService.state.fontSize),
             foreground = selectedForegroundColor(),
             lineSpacingPercent = stateService.state.lineSpacingPercent,
+            weightLevel = selectedFontWeight().paintLevel,
         )
         updateStatus()
     }
@@ -697,7 +718,12 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
 
     private fun selectedFontFamily(): String = stateService.state.fontFamily ?: defaultFontFamily()
 
-    private fun selectedFontStyle(): Int = if (stateService.state.boldText) Font.BOLD else Font.PLAIN
+    private fun selectedFontWeight(): FontWeight {
+        val selectedName = stateService.state.fontWeightName.takeIf { it.isNotBlank() }
+            ?: (fontWeightSelector.selectedItem as? String)
+            ?: "标准"
+        return fontWeights.firstOrNull { it.name == selectedName } ?: fontWeights.first()
+    }
 
     private fun updateControls() {
         val book = currentBook
@@ -714,7 +740,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         fontSelector.isEnabled = true
         themeSelector.isEnabled = true
         widthSelector.isEnabled = true
-        boldTextCheckBox.isEnabled = true
+        fontWeightSelector.isEnabled = true
         hideCursorCheckBox.isEnabled = true
 
         updateStatus()
@@ -767,7 +793,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         configureButton(openButton, "打开", ReaderButtonIcon(ButtonIconKind.OPEN), "打开 TXT 文件", useIcons)
         configureButton(previousButton, "上一章", ReaderButtonIcon(ButtonIconKind.PREVIOUS), "上一章", useIcons)
         configureButton(nextButton, "下一章", ReaderButtonIcon(ButtonIconKind.NEXT), "下一章", useIcons)
-        configureToggleButton(boldTextCheckBox, "加粗", ReaderButtonIcon(ButtonIconKind.BOLD), "加粗正文", useIcons)
+        configureFontWeightSelector(useIcons)
         configureButton(smallerButton, "A-", ReaderButtonIcon(ButtonIconKind.FONT_SMALLER), "减小字号", useIcons)
         configureButton(largerButton, "A+", ReaderButtonIcon(ButtonIconKind.FONT_LARGER), "增大字号", useIcons)
         configureButton(tighterLineButton, "行距-", ReaderButtonIcon(ButtonIconKind.LINE_TIGHTER), "减小行距", useIcons)
@@ -794,21 +820,24 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         }
     }
 
-    private fun configureToggleButton(
-        button: JCheckBox,
-        text: String,
-        icon: Icon,
-        tooltip: String,
-        useIcons: Boolean,
-    ) {
-        button.toolTipText = tooltip
-        button.text = if (useIcons) null else text
-        button.icon = if (useIcons) icon else null
-        button.selectedIcon = if (useIcons) icon else null
-        button.preferredSize = if (useIcons) {
-            Dimension(JBUI.scale(34), button.preferredSize.height)
-        } else {
-            null
+    private fun configureFontWeightSelector(useIcons: Boolean) {
+        fontWeightSelector.toolTipText = "调整正文粗细"
+        val width = if (useIcons) 56 else 80
+        fontWeightSelector.preferredSize = Dimension(JBUI.scale(width), fontWeightSelector.preferredSize.height)
+        fontWeightSelector.renderer = object : DefaultListCellRenderer() {
+            override fun getListCellRendererComponent(
+                list: JList<*>?,
+                value: Any?,
+                index: Int,
+                isSelected: Boolean,
+                cellHasFocus: Boolean,
+            ): java.awt.Component {
+                val component = super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus) as JLabel
+                val weight = fontWeights.firstOrNull { it.name == value }
+                component.text = if (useIcons && weight != null) weight.shortName else value?.toString().orEmpty()
+                component.toolTipText = weight?.description
+                return component
+            }
         }
     }
 
@@ -857,6 +886,13 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             "暖棕" to Color(0x4B3828),
             "护眼绿" to Color(0x31452D),
             "淡灰" to Color(0xC9CDD4),
+        )
+
+        private val fontWeights = listOf(
+            FontWeight("标准", "标准", "标准字重", Font.PLAIN, 0),
+            FontWeight("半粗", "B-", "略微加粗", Font.BOLD, 1),
+            FontWeight("加粗", "B", "加粗正文", Font.BOLD, 2),
+            FontWeight("特粗", "B+", "更粗正文", Font.BOLD, 3),
         )
 
         private val preferredFontFamilies = listOf(
@@ -912,11 +948,18 @@ private data class ReaderTheme(
     val foreground: Color?,
 )
 
+private data class FontWeight(
+    val name: String,
+    val shortName: String,
+    val description: String,
+    val style: Int,
+    val paintLevel: Int,
+)
+
 private enum class ButtonIconKind {
     OPEN,
     PREVIOUS,
     NEXT,
-    BOLD,
     FONT_SMALLER,
     FONT_LARGER,
     LINE_TIGHTER,
@@ -942,7 +985,6 @@ private class ReaderButtonIcon(private val kind: ButtonIconKind) : Icon {
                 ButtonIconKind.OPEN -> paintOpen(g, x, y)
                 ButtonIconKind.PREVIOUS -> paintArrow(g, x, y, left = true)
                 ButtonIconKind.NEXT -> paintArrow(g, x, y, left = false)
-                ButtonIconKind.BOLD -> paintText(g, x, y, "B")
                 ButtonIconKind.FONT_SMALLER -> paintText(g, x, y, "A-")
                 ButtonIconKind.FONT_LARGER -> paintText(g, x, y, "A+")
                 ButtonIconKind.LINE_TIGHTER -> paintLines(g, x, y, tight = true)
@@ -1001,6 +1043,7 @@ private class VirtualReaderPane : JComponent(), Scrollable {
     private var ascent = JBUI.scale(20)
     private var foregroundColor = UIManager.getColor("TextArea.foreground")
     private var lineSpacingPercent = 20
+    private var weightLevel = 0
     private var selectionStart: Int? = null
     private var selectionEnd: Int? = null
 
@@ -1017,11 +1060,12 @@ private class VirtualReaderPane : JComponent(), Scrollable {
         rebuildLayout()
     }
 
-    fun updateReaderStyle(font: Font, foreground: Color, lineSpacingPercent: Int) {
+    fun updateReaderStyle(font: Font, foreground: Color, lineSpacingPercent: Int, weightLevel: Int) {
         this.font = font
         this.foregroundColor = foreground
         this.foreground = foreground
         this.lineSpacingPercent = lineSpacingPercent
+        this.weightLevel = weightLevel
         rebuildLayout()
     }
 
@@ -1108,7 +1152,7 @@ private class VirtualReaderPane : JComponent(), Scrollable {
                 if (line.endOffset <= line.startOffset) {
                     continue
                 }
-                g.drawString(line.text, contentInsets.left, line.y + ascent)
+                drawWeightedText(g, line.text, contentInsets.left, line.y + ascent)
             }
         } finally {
             g.dispose()
@@ -1303,6 +1347,14 @@ private class VirtualReaderPane : JComponent(), Scrollable {
             xPositions[index + 1] = x
         }
         return VirtualLine(start, end, y, text, xPositions)
+    }
+
+    private fun drawWeightedText(g: Graphics2D, text: String, x: Int, y: Int) {
+        g.drawString(text, x, y)
+        val extraPaints = (weightLevel - 1).coerceAtLeast(0)
+        for (index in 0 until extraPaints) {
+            g.drawString(text, x + JBUI.scale(index + 1), y)
+        }
     }
 }
 
