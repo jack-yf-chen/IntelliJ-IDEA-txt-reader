@@ -117,7 +117,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             if (!updatingWidthSelector) {
                 stateService.state.widthMode = widthSelector.selectedItem as String
                 scheduleRelayoutRestore()
-                updateReaderInsets()
+                updateReaderInsets(rebuildLayout = true)
                 focusReader()
             }
         }
@@ -152,7 +152,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         scrollPane.viewport.addComponentListener(object : ComponentAdapter() {
             override fun componentResized(event: ComponentEvent) {
                 scheduleRelayoutRestore()
-                updateReaderInsets()
+                updateReaderInsets(rebuildLayout = false)
             }
         })
 
@@ -508,7 +508,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     private fun updateReaderStyle() {
         scheduleRelayoutRestore()
         applyTheme()
-        updateReaderInsets()
+        updateReaderInsets(rebuildLayout = false)
         textPane.updateReaderStyle(
             font = Font(selectedFontFamily(), selectedFontStyle(), stateService.state.fontSize),
             foreground = selectedForegroundColor(),
@@ -529,7 +529,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         return selectedTextColor() ?: theme.foreground ?: UIManager.getColor("TextArea.foreground")
     }
 
-    private fun updateReaderInsets() {
+    private fun updateReaderInsets(rebuildLayout: Boolean = true) {
         val base = JBUI.scale(14)
         val viewportWidth = scrollPane.viewport.width.takeIf { it > 0 } ?: 0
         val maxContentWidth = widthModes[stateService.state.widthMode] ?: widthModes.getValue("舒适")
@@ -539,7 +539,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             ((viewportWidth - JBUI.scale(maxContentWidth)) / 2).coerceAtLeast(base)
         }
         val rightInset = sideInset + JBUI.scale(RIGHT_SELECTION_GUTTER)
-        textPane.updateContentInsets(Insets(base, sideInset, base, rightInset))
+        textPane.updateContentInsets(Insets(base, sideInset, base, rightInset), rebuildLayout)
     }
 
     private fun scheduleRelayoutRestore() {
@@ -558,6 +558,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         val targetOffset = (relayoutAnchorOffset ?: stateService.state.globalOffset).coerceIn(0, book.content.length)
         relayoutAnchorOffset = null
         SwingUtilities.invokeLater {
+            textPane.rebuildLayoutForCurrentSize()
             scrollToGlobalOffset(targetOffset, preserveAnchor = true)
             layoutRestoring = false
         }
@@ -1003,8 +1004,19 @@ private class VirtualReaderPane : JComponent(), Scrollable {
         rebuildLayout()
     }
 
-    fun updateContentInsets(insets: Insets) {
+    fun updateContentInsets(insets: Insets, rebuildLayout: Boolean = true) {
+        if (contentInsets == insets && !rebuildLayout) {
+            return
+        }
         contentInsets = insets
+        if (rebuildLayout) {
+            rebuildLayout()
+        } else {
+            repaint()
+        }
+    }
+
+    fun rebuildLayoutForCurrentSize() {
         rebuildLayout()
     }
 
@@ -1075,8 +1087,7 @@ private class VirtualReaderPane : JComponent(), Scrollable {
                 if (line.endOffset <= line.startOffset) {
                     continue
                 }
-                val text = currentBook.content.substring(line.startOffset, line.endOffset)
-                g.drawString(text, contentInsets.left, line.y + ascent)
+                g.drawString(line.text, contentInsets.left, line.y + ascent)
             }
         } finally {
             g.dispose()
@@ -1121,7 +1132,7 @@ private class VirtualReaderPane : JComponent(), Scrollable {
 
     private fun layoutContent(content: String, metrics: FontMetrics): List<VirtualLine> {
         if (content.isEmpty()) {
-            return listOf(VirtualLine(0, 0, contentInsets.top))
+            return listOf(VirtualLine(0, 0, contentInsets.top, "", intArrayOf(0)))
         }
 
         val result = mutableListOf<VirtualLine>()
@@ -1136,7 +1147,8 @@ private class VirtualReaderPane : JComponent(), Scrollable {
 
         fun addLine(endOffset: Int) {
             val y = contentInsets.top + result.size * lineHeight
-            result.add(VirtualLine(lineStart, endOffset.coerceAtLeast(lineStart), y))
+            val safeEnd = endOffset.coerceAtLeast(lineStart)
+            result.add(createLine(content, lineStart, safeEnd, y, metrics))
         }
 
         while (index < content.length) {
@@ -1220,8 +1232,8 @@ private class VirtualReaderPane : JComponent(), Scrollable {
             if (selectedStart >= selectedEnd) {
                 continue
             }
-            val x = contentInsets.left + textWidth(currentBook.content, line.startOffset, selectedStart)
-            val width = textWidth(currentBook.content, selectedStart, selectedEnd).coerceAtLeast(JBUI.scale(2))
+            val x = contentInsets.left + line.xForOffset(selectedStart)
+            val width = (line.xForOffset(selectedEnd) - line.xForOffset(selectedStart)).coerceAtLeast(JBUI.scale(2))
             g.fillRect(x, line.y, width, lineHeight)
         }
     }
@@ -1233,17 +1245,7 @@ private class VirtualReaderPane : JComponent(), Scrollable {
         }
         val line = lines[lineIndexForY(point.y)]
         val x = (point.x - contentInsets.left).coerceAtLeast(0)
-        var offset = line.startOffset
-        var width = 0
-        while (offset < line.endOffset) {
-            val charWidth = getFontMetrics(font).charWidth(currentBook.content[offset]).coerceAtLeast(1)
-            if (x < width + charWidth / 2) {
-                break
-            }
-            width += charWidth
-            offset++
-        }
-        return offset.coerceIn(0, currentBook.content.length)
+        return line.offsetForX(x).coerceIn(0, currentBook.content.length)
     }
 
     private fun lineIndexForY(y: Int): Int {
@@ -1271,11 +1273,15 @@ private class VirtualReaderPane : JComponent(), Scrollable {
         return lines.getOrNull((insertionPoint - 1).coerceIn(0, lines.lastIndex))
     }
 
-    private fun textWidth(content: String, start: Int, end: Int): Int {
-        if (start >= end) {
-            return 0
+    private fun createLine(content: String, start: Int, end: Int, y: Int, metrics: FontMetrics): VirtualLine {
+        val text = content.substring(start, end)
+        val xPositions = IntArray(text.length + 1)
+        var x = 0
+        for (index in text.indices) {
+            x += metrics.charWidth(text[index]).coerceAtLeast(1)
+            xPositions[index + 1] = x
         }
-        return getFontMetrics(font).stringWidth(content.substring(start, end))
+        return VirtualLine(start, end, y, text, xPositions)
     }
 }
 
@@ -1283,7 +1289,29 @@ private data class VirtualLine(
     val startOffset: Int,
     val endOffset: Int,
     val y: Int,
-)
+    val text: String,
+    val xPositions: IntArray,
+) {
+    fun xForOffset(offset: Int): Int {
+        val index = (offset - startOffset).coerceIn(0, xPositions.lastIndex)
+        return xPositions[index]
+    }
+
+    fun offsetForX(x: Int): Int {
+        if (xPositions.isEmpty()) {
+            return startOffset
+        }
+        val insertion = xPositions.binarySearch(x)
+        val index = if (insertion >= 0) {
+            insertion
+        } else {
+            val next = (-insertion - 1).coerceIn(0, xPositions.lastIndex)
+            val previous = (next - 1).coerceAtLeast(0)
+            if (x - xPositions[previous] <= xPositions[next] - x) previous else next
+        }
+        return (startOffset + index).coerceIn(startOffset, endOffset)
+    }
+}
 
 private fun createHiddenCursor(): Cursor {
     val image = BufferedImage(16, 16, BufferedImage.TYPE_INT_ARGB)

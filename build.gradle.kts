@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "com.chen.reader"
-version = "0.3.0-alpha.2"
+version = "0.3.0-beta.1"
 
 kotlin {
     jvmToolchain(21)
