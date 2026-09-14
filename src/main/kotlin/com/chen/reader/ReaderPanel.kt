@@ -58,6 +58,8 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     private var lastScrollValue = 0
     private var layoutRestoring = false
     private var relayoutAnchorOffset: Int? = null
+    private var pendingScrollRestore: PendingScrollRestore? = null
+    private var pendingScrollRestoreAttempts = 0
     private val relayoutTimer = Timer(160) { restoreViewportAfterRelayout() }.apply {
         isRepeats = false
     }
@@ -345,14 +347,15 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     fun openBook(path: Path, restoreState: Boolean = false) {
         try {
             val state = stateService.state
-            val preferredCharset = if (restoreState && state.filePath == path.toString()) state.charsetName else null
+            val shouldRestoreState = restoreState || isSameBookPath(state.filePath, path)
+            val preferredCharset = if (shouldRestoreState) state.charsetName else null
             val book = TxtBookLoader.load(path, preferredCharset)
             currentBook = book
             textPane.setBook(book)
 
             state.filePath = path.toString()
             state.charsetName = book.charset.name()
-            if (!restoreState) {
+            if (!shouldRestoreState) {
                 state.chapterIndex = 0
                 state.scrollValue = 0
                 state.globalOffset = 0
@@ -362,9 +365,21 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
 
             updateChapterSelector(book.chapters)
             val index = state.chapterIndex.coerceIn(0, book.chapters.lastIndex)
-            renderChapter(index, restoreScroll = restoreState)
+            renderChapter(index, restoreScroll = shouldRestoreState)
         } catch (error: Throwable) {
             Messages.showErrorDialog(project, error.message ?: "打开 TXT 文件失败。", "Novel Reader")
+        }
+    }
+
+    private fun isSameBookPath(savedPath: String?, path: Path): Boolean {
+        if (savedPath.isNullOrBlank()) {
+            return false
+        }
+
+        return try {
+            Path.of(savedPath).toAbsolutePath().normalize() == path.toAbsolutePath().normalize()
+        } catch (_: Throwable) {
+            savedPath == path.toString()
         }
     }
 
@@ -393,7 +408,12 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             restoreScroll -> restoreOffset(book, chapter) ?: chapter.startOffset
             else -> chapter.startOffset
         }
-        scrollToGlobalOffset(targetOffset, alignEnd = scrollToBottom, preserveAnchor = restoreScroll)
+        scrollToGlobalOffset(
+            targetOffset = targetOffset,
+            alignEnd = scrollToBottom,
+            preserveAnchor = restoreScroll,
+            allowDeferredRestore = restoreScroll,
+        )
         updateControls()
     }
 
@@ -401,24 +421,61 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         targetOffset: Int,
         alignEnd: Boolean = false,
         preserveAnchor: Boolean = false,
+        allowDeferredRestore: Boolean = false,
     ) {
         val book = currentBook ?: return
         val scrollBar = scrollPane.verticalScrollBar
-        val maxScrollValue = (scrollBar.maximum - scrollBar.visibleAmount).coerceAtLeast(0)
+        val viewportHeight = scrollPane.viewport.height
+        val scrollBarMaxValue = (scrollBar.maximum - scrollBar.visibleAmount).coerceAtLeast(0)
+        val expectedMaxValue = (textPane.preferredSize.height - viewportHeight).coerceAtLeast(0)
+        val maxScrollValue = maxOf(scrollBarMaxValue, expectedMaxValue)
+        val safeOffset = targetOffset.coerceIn(0, book.content.length)
+        if (
+            allowDeferredRestore &&
+            pendingScrollRestoreAttempts < MAX_DEFERRED_RESTORE_ATTEMPTS &&
+            shouldDeferScrollRestore(safeOffset, viewportHeight, scrollBarMaxValue, expectedMaxValue)
+        ) {
+            deferScrollRestore(safeOffset, alignEnd, preserveAnchor)
+            return
+        }
+
         val scrollValue = textPane.scrollValueForOffset(
-            targetOffset.coerceIn(0, book.content.length),
-            viewportHeight = scrollPane.viewport.height,
+            safeOffset,
+            viewportHeight = viewportHeight,
             alignEnd = alignEnd,
             preserveAnchor = preserveAnchor,
             anchorRatio = VIEWPORT_ANCHOR_RATIO,
         ).coerceIn(0, maxScrollValue)
 
+        scrollPane.viewport.viewPosition = Point(0, scrollValue)
         scrollBar.value = scrollValue
         lastScrollValue = scrollValue
         stateService.state.scrollValue = scrollValue
         updateReadingPositionForGlobalOffset(viewportAnchorOffset())
         focusReader()
         updateStatus()
+    }
+
+    private fun shouldDeferScrollRestore(
+        targetOffset: Int,
+        viewportHeight: Int,
+        scrollBarMaxValue: Int,
+        expectedMaxValue: Int,
+    ): Boolean {
+        if (targetOffset <= 0) {
+            return false
+        }
+        if (viewportHeight <= 0) {
+            return true
+        }
+        return expectedMaxValue > 0 && scrollBarMaxValue <= 0
+    }
+
+    private fun deferScrollRestore(targetOffset: Int, alignEnd: Boolean, preserveAnchor: Boolean) {
+        pendingScrollRestore = PendingScrollRestore(targetOffset, alignEnd, preserveAnchor)
+        pendingScrollRestoreAttempts++
+        layoutRestoring = true
+        relayoutTimer.restart()
     }
 
     private fun updateCurrentChapterFromScroll() {
@@ -576,12 +633,25 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
 
     private fun restoreViewportAfterRelayout() {
         val book = currentBook ?: return
-        val targetOffset = (relayoutAnchorOffset ?: stateService.state.globalOffset).coerceIn(0, book.content.length)
+        val pendingRestore = pendingScrollRestore
+        val targetOffset = (pendingRestore?.targetOffset ?: relayoutAnchorOffset ?: stateService.state.globalOffset)
+            .coerceIn(0, book.content.length)
+        val alignEnd = pendingRestore?.alignEnd ?: false
+        val preserveAnchor = pendingRestore?.preserveAnchor ?: true
+        pendingScrollRestore = null
         relayoutAnchorOffset = null
         SwingUtilities.invokeLater {
             textPane.rebuildLayoutForCurrentSize()
-            scrollToGlobalOffset(targetOffset, preserveAnchor = true)
-            layoutRestoring = false
+            scrollToGlobalOffset(
+                targetOffset = targetOffset,
+                alignEnd = alignEnd,
+                preserveAnchor = preserveAnchor,
+                allowDeferredRestore = pendingScrollRestoreAttempts < MAX_DEFERRED_RESTORE_ATTEMPTS,
+            )
+            if (pendingScrollRestore == null) {
+                pendingScrollRestoreAttempts = 0
+                layoutRestoring = false
+            }
         }
     }
 
@@ -916,6 +986,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         private const val ANCHOR_SEARCH_RADIUS = 3000
         private const val VIEWPORT_ANCHOR_RATIO = 0.25
         private const val RIGHT_SELECTION_GUTTER = 28
+        private const val MAX_DEFERRED_RESTORE_ATTEMPTS = 8
         private const val BUTTON_STYLE_TEXT = "文字"
         private const val BUTTON_STYLE_ICON = "图标"
         private val chapterPrefix = Regex("""^第[0-9零〇一二两三四五六七八九十百千万]{1,12}[章节回卷集部篇]""")
@@ -938,6 +1009,12 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             return state.buttonStyle
         }
     }
+
+    private data class PendingScrollRestore(
+        val targetOffset: Int,
+        val alignEnd: Boolean,
+        val preserveAnchor: Boolean,
+    )
 }
 
 private fun Int?.orZero(): Int = this ?: 0
