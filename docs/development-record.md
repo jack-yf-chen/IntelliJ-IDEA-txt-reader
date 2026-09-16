@@ -17,9 +17,10 @@
 - 增加 `Tools -> Novel Reader` 菜单入口。
 - 增加右侧 `Novel Reader` 工具窗口。
 - 增加 TXT 读取器，支持 UTF-8、GB18030、GBK 编码回退。
+- 增加 EPUB 读取器，支持按 OPF spine 顺序提取 XHTML 正文。
 - 增加章节解析器，支持常见中文章节标题和 `Chapter N`。
 - 增加 Swing 阅读面板，包含：
-  - 打开 TXT
+  - 打开 TXT 或 EPUB
   - 上一章
   - 章节选择
   - 下一章
@@ -58,6 +59,8 @@
 - `src/main/resources/META-INF/plugin.xml`
 - `src/main/resources/icons/reader.svg`
 - `src/main/kotlin/com/chen/reader/ChapterParser.kt`
+- `src/main/kotlin/com/chen/reader/BookLoader.kt`
+- `src/main/kotlin/com/chen/reader/EpubBookLoader.kt`
 - `src/main/kotlin/com/chen/reader/NovelReaderOpener.kt`
 - `src/main/kotlin/com/chen/reader/NovelReaderToolWindowFactory.kt`
 - `src/main/kotlin/com/chen/reader/OpenNovelAction.kt`
@@ -121,6 +124,7 @@
 - 2026-09-04：将插件版本号提升到 `0.3.0`。正式收口虚拟阅读器版本：加粗控件移动到字号和行距调整之前；按钮格式切换为图标模式时，加粗使用字母 `B` 图标显示，文字按钮模式下显示中文“加粗”。
 - 2026-09-04：将插件版本号提升到 `0.3.1`。将单一加粗开关升级为多档字重下拉框，提供“标准、半粗、加粗、特粗”四种规格；图标按钮模式下使用 `标准、B-、B、B+` 显示，文字按钮模式下显示中文规格名称。
 - 2026-09-14：将插件版本号提升到 `0.3.2`。修复重启电脑或重新打开同一本 TXT 后阅读记忆失效的问题：打开文件时先判断是否为上次阅读的同一本书，同书打开不再清空章节、全书 offset 和锚点；恢复滚动位置时如果工具窗口尚未完成布局，则延迟到滚动范围可用后再定位，避免初始化阶段把阅读位置误写回开头。
+- 2026-09-16：将插件版本号提升到 `0.4.0`。增加 EPUB 格式支持：通过 `BookLoader` 统一分发 TXT/EPUB，EPUB 读取器解析 `container.xml`、OPF manifest 和 spine，按阅读顺序提取 XHTML 正文并生成章节；现有虚拟阅读、章节导航、进度、划词查词和阅读记忆能力继续复用。
 
 ## 后续验证步骤
 
@@ -147,6 +151,8 @@ build/distributions/
 - 确认 `Tools -> Novel Reader` 可见。
 - 打开 UTF-8 TXT 文件。
 - 打开 GBK 或 GB18030 中文 TXT 文件。
+- 打开 EPUB 文件，确认能按电子书阅读顺序显示正文。
+- 确认 EPUB 章节下拉框、上一章 / 下一章、全书进度和阅读记忆正常。
 - 确认章节检测和章节导航正常。
 - 确认章节边界可以连续阅读，章节尾部和下一章开头可以同屏查看。
 - 确认在章节边界附近连续滚动时，不会出现滚轮多次空转或明显停顿。

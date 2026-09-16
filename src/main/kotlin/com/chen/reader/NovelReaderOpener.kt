@@ -1,7 +1,7 @@
 package com.chen.reader
 
 import com.intellij.openapi.fileChooser.FileChooser
-import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
+import com.intellij.openapi.fileChooser.FileChooserDescriptor
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.wm.ToolWindowManager
@@ -12,15 +12,17 @@ object NovelReaderOpener {
     private const val TOOL_WINDOW_ID = "Novel Reader"
 
     fun openFromFileChooser(project: Project) {
-        val descriptor = FileChooserDescriptorFactory
-            .createSingleFileDescriptor("txt")
-            .withTitle("选择 TXT 小说")
-            .withDescription("打开本地 TXT 文件")
+        val descriptor = FileChooserDescriptor(true, false, false, false, false, false)
+            .withFileFilter { file ->
+                !file.isDirectory && BookLoader.supportedExtensions.contains(file.extension?.lowercase())
+            }
+            .withTitle("选择小说文件")
+            .withDescription("打开本地 TXT 或 EPUB 文件")
 
         val file = FileChooser.chooseFile(descriptor, project, null) ?: return
         val path = file.toNioPath()
-        if (!path.extension.equals("txt", ignoreCase = true)) {
-            Messages.showWarningDialog(project, "第一版仅支持 TXT 文件。", "Novel Reader")
+        if (!BookLoader.supportedExtensions.contains(path.extension.lowercase())) {
+            Messages.showWarningDialog(project, "当前支持 TXT 和 EPUB 文件。", "Novel Reader")
             return
         }
 
@@ -50,4 +52,3 @@ object NovelReaderOpener {
         return null
     }
 }
-

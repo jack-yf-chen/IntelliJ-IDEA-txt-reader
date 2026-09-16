@@ -14,17 +14,18 @@
 - IntelliJ Platform Gradle Plugin 2.x：https://plugins.jetbrains.com/docs/intellij/tools-intellij-platform-gradle-plugin.html
 - IntelliJ Platform Gradle Plugin 扩展配置：https://plugins.jetbrains.com/docs/intellij/tools-intellij-platform-gradle-plugin-extension.html
 
-## 第一版范围
+## 当前范围
 
-第一版只聚焦 TXT 小说阅读。
+第一版只聚焦 TXT 小说阅读；`0.4.0` 起增加 EPUB 本地阅读支持。
 
 必须支持：
 
 - 可安装到 IntelliJ IDEA 2026.1.3 的 IntelliJ Platform 插件。
 - 可从 `Tools` 菜单打开插件。
 - 提供 `Novel Reader` 工具窗口，默认锚定在右侧。
-- 打开本地 `.txt` 文件。
+- 打开本地 `.txt` 和 `.epub` 文件。
 - 尽量正确显示中文 TXT 内容。
+- 尽量正确提取 EPUB 中 OPF spine 声明的 XHTML 正文。
 - 根据常见 TXT 章节标题识别章节。
 - 支持上一章 / 下一章导航。
 - 支持从章节选择框跳转章节。
@@ -41,9 +42,9 @@
 - 支持章节边界连续滚动切换。
 - 支持保存并恢复基础阅读状态。
 
-第一版暂不支持：
+当前暂不支持：
 
-- EPUB、PDF、MOBI 或在线书源。
+- PDF、MOBI 或在线书源。
 - 书架管理。
 - 云同步。
 - 插件市场发布自动化。
@@ -55,7 +56,7 @@
 
 顶部控件：
 
-- 打开 TXT 文件。
+- 打开 TXT 或 EPUB 文件。
 - 上一章。
 - 章节选择。
 - 章节选择器使用紧凑宽度，只显示可分辨章节序号的短标签，完整章节标题通过鼠标悬浮提示查看。
@@ -103,7 +104,7 @@
 - 保存偏移位置附近的原文片段 `anchorText`，用于恢复时校验和修正位置。
 - 保存章节内千分比 `progressInChapterPermille`，用于 TXT 内容变化或锚点失效时兜底恢复。
 - 保留旧字段 `scrollValue` 作为兼容兜底，避免旧版本升级后完全丢失阅读位置。
-- 再次打开同一本 TXT 时应视为继续阅读，不清空章节、全书 offset 和锚点。
+- 再次打开同一本 TXT 或 EPUB 时应视为继续阅读，不清空章节、全书 offset 和锚点。
 - 工具窗口初始化或窗口重排期间，如果滚动条范围尚未可用，应延迟恢复阅读位置，并禁止把临时开头位置写回阅读记录。
 
 ## 技术设计
@@ -117,11 +118,13 @@
 
 主要组件：
 
-- `OpenNovelAction`：注册到 `Tools -> Novel Reader` 子菜单，打开 TXT 文件选择器并激活工具窗口。
+- `OpenNovelAction`：注册到 `Tools -> Novel Reader` 子菜单，打开小说文件选择器并激活工具窗口。
 - `ToggleButtonStyleAction`：注册到 `Tools -> Novel Reader` 子菜单，在文字按钮和简略图标按钮之间切换阅读工具栏显示方式。
 - `NovelReaderToolWindowFactory`：创建工具窗口并安装阅读面板。
 - `ReaderPanel`：基于 Swing 的阅读 UI，负责文件打开、章节导航、阅读样式控制和状态保存。
+- `BookLoader`：按文件扩展名分发到具体读取器。
 - `TxtBookLoader`：TXT 文件读取器，支持编码回退。
+- `EpubBookLoader`：EPUB 文件读取器，解析 `container.xml`、OPF manifest 和 spine，按阅读顺序提取 XHTML 正文。
 - `ChapterParser`：基于常见中英文章节标题的简单章节解析器。
 - `ReaderStateService`：项目级持久化状态，保存最后打开文件、编码、章节索引、滚动位置、字体、文字颜色、字号、行距、主题、阅读宽度、隐藏光标开关和按钮显示方式。
 
@@ -153,6 +156,14 @@ TXT 编码策略：
 2. 尝试 GB18030。
 3. 尝试 GBK。
 4. 全部失败时提示可读错误。
+
+EPUB 解析策略：
+
+1. 从 `META-INF/container.xml` 查找 OPF package 文件。
+2. 读取 OPF manifest，筛选 XHTML/HTML 正文资源。
+3. 按 OPF spine 中的 `itemref` 顺序拼接正文，避免按压缩包文件名排序造成章节错乱。
+4. 优先使用 XHTML 中的 `h1`/`h2`/`h3` 或 `title` 作为章节标题，缺失时使用“第 N 章”兜底。
+5. 将 XHTML 标签转换为纯文本段落，保留基础换行和常见 HTML 实体。
 
 章节解析策略：
 
@@ -206,3 +217,4 @@ TXT 编码策略：
 - 2026-09-04：将插件版本号提升到 `0.3.0`，加粗控件移动到字号和行距调整之前，并随按钮显示方式切换为中文文字或 `B` 图标。
 - 2026-09-04：将插件版本号提升到 `0.3.1`，单一加粗开关升级为多档字重下拉框，提供标准、半粗、加粗和特粗规格。
 - 2026-09-14：将插件版本号提升到 `0.3.2`，修复阅读记忆恢复被同书打开重置或初始化布局回写覆盖的问题。
+- 2026-09-16：将插件版本号提升到 `0.4.0`，增加 EPUB 本地阅读支持，按 OPF spine 顺序解析 XHTML 正文并复用现有阅读器、章节导航、进度和阅读记忆能力。

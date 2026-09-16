@@ -23,6 +23,7 @@ import javax.swing.*
 import javax.swing.Timer
 import javax.swing.event.PopupMenuEvent
 import javax.swing.event.PopupMenuListener
+import kotlin.io.path.extension
 
 class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     private val stateService = ReaderStateService.getInstance(project)
@@ -349,7 +350,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             val state = stateService.state
             val shouldRestoreState = restoreState || isSameBookPath(state.filePath, path)
             val preferredCharset = if (shouldRestoreState) state.charsetName else null
-            val book = TxtBookLoader.load(path, preferredCharset)
+            val book = BookLoader.load(path, preferredCharset)
             currentBook = book
             textPane.setBook(book)
 
@@ -367,7 +368,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             val index = state.chapterIndex.coerceIn(0, book.chapters.lastIndex)
             renderChapter(index, restoreScroll = shouldRestoreState)
         } catch (error: Throwable) {
-            Messages.showErrorDialog(project, error.message ?: "打开 TXT 文件失败。", "Novel Reader")
+            Messages.showErrorDialog(project, error.message ?: "打开小说文件失败。", "Novel Reader")
         }
     }
 
@@ -823,7 +824,15 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         } else {
             val fileName = book.path.fileName.toString()
             val index = stateService.state.chapterIndex
-            "$fileName | 第 ${index + 1}/${book.chapters.size} 章 | 本章 ${chapterProgress()} | 全书 ${bookProgress()} | ${book.charset.name()}"
+            "$fileName | 第 ${index + 1}/${book.chapters.size} 章 | 本章 ${chapterProgress()} | 全书 ${bookProgress()} | ${bookFormatName(book)}"
+        }
+    }
+
+    private fun bookFormatName(book: Book): String {
+        return if (book.path.extension.equals("epub", ignoreCase = true)) {
+            "EPUB"
+        } else {
+            book.charset.name()
         }
     }
 
@@ -860,7 +869,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
 
     fun updateButtonStyle() {
         val useIcons = stateService.state.buttonStyle == BUTTON_STYLE_ICON
-        configureButton(openButton, "打开", ReaderButtonIcon(ButtonIconKind.OPEN), "打开 TXT 文件", useIcons)
+        configureButton(openButton, "打开", ReaderButtonIcon(ButtonIconKind.OPEN), "打开 TXT 或 EPUB 文件", useIcons)
         configureButton(previousButton, "上一章", ReaderButtonIcon(ButtonIconKind.PREVIOUS), "上一章", useIcons)
         configureButton(nextButton, "下一章", ReaderButtonIcon(ButtonIconKind.NEXT), "下一章", useIcons)
         configureFontWeightSelector(useIcons)
