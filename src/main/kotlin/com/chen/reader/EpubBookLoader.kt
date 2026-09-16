@@ -15,17 +15,29 @@ import javax.xml.parsers.DocumentBuilderFactory
 
 object EpubBookLoader {
     private val utf8 = StandardCharsets.UTF_8
-    private val blockTagRegex = Regex(
-        """(?i)</?(p|div|section|article|header|footer|blockquote|pre|h[1-6]|li|tr|table|nav|body|html)\b[^>]*>""",
-    )
+    private val blockTagRegex = Regex("""(?i)</?(p|div|section|article|header|footer|table|nav|body|html|ul|ol|dl|dt|dd)\b[^>]*>""")
     private val lineBreakRegex = Regex("""(?i)<br\b[^>]*>""")
     private val tagRegex = Regex("""<[^>]+>""")
     private val scriptStyleRegex = Regex("""(?is)<(script|style|head)\b[^>]*>.*?</\1>""")
     private val bodyRegex = Regex("""(?is)<body\b[^>]*>(.*?)</body>""")
     private val titleRegex = Regex("""(?is)<title\b[^>]*>(.*?)</title>""")
     private val headingRegex = Regex("""(?is)<h[1-3]\b[^>]*>(.*?)</h[1-3]>""")
+    private val anyHeadingRegex = Regex("""(?is)<h([1-6])\b[^>]*>(.*?)</h\1>""")
+    private val footnoteElementRegex = Regex(
+        """(?is)<(aside|section|div|li|p)\b([^>]*(?:epub:type\s*=\s*["'][^"']*(?:footnote|endnote|note)[^"']*["']|class\s*=\s*["'][^"']*(?:footnote|endnote|annotation|fn)[^"']*["']|id\s*=\s*["'][^"']*(?:footnote|endnote|annotation|fn)[^"']*["'])[^>]*)>(.*?)</\1>""",
+    )
+    private val anchorRegex = Regex("""(?is)<a\b([^>]*)>(.*?)</a>""")
+    private val imageRegex = Regex("""(?is)<img\b([^>]*)/?>""")
+    private val tableRowRegex = Regex("""(?is)<tr\b[^>]*>(.*?)</tr>""")
+    private val tableCellRegex = Regex("""(?is)<t[hd]\b[^>]*>(.*?)</t[hd]>""")
+    private val blockquoteRegex = Regex("""(?is)<blockquote\b[^>]*>(.*?)</blockquote>""")
+    private val listItemRegex = Regex("""(?is)<li\b[^>]*>(.*?)</li>""")
+    private val rubyRegex = Regex("""(?is)<ruby\b[^>]*>(.*?)<rt\b[^>]*>(.*?)</rt>(.*?)</ruby>""")
+    private val strongRegex = Regex("""(?is)<(strong|b)\b[^>]*>(.*?)</\1>""")
+    private val emphasisRegex = Regex("""(?is)<(em|i)\b[^>]*>(.*?)</\1>""")
     private val encodingRegex = Regex("""(?i)encoding\s*=\s*["']([^"']+)["']""")
     private val htmlEntityRegex = Regex("""&(#x?[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]+);""")
+    private val attributeRegex = Regex("""(?is)\b([:\w-]+)\s*=\s*["']([^"']*)["']""")
 
     fun load(path: Path): Book {
         ZipFile(path.toFile(), utf8).use { zip ->
@@ -186,16 +198,25 @@ object EpubBookLoader {
         val title = headingRegex.find(markup)?.groupValues?.getOrNull(1)
             ?: titleRegex.find(markup)?.groupValues?.getOrNull(1)
         return title
-            ?.let(::stripMarkup)
+            ?.let(::stripInlineMarkup)
             ?.trim()
             ?.takeIf { it.isNotBlank() }
     }
 
     private fun extractBodyText(markup: String): String {
         val body = bodyRegex.find(markup)?.groupValues?.getOrNull(1) ?: markup
-        return stripMarkup(body)
-            .lines()
-            .map { it.trim() }
+        val footnotes = collectFootnotes(body)
+        val bodyWithoutFootnotes = removeFootnoteBlocks(body)
+        val bodyWithFootnoteRefs = replaceFootnoteLinks(bodyWithoutFootnotes, footnotes)
+        val text = stripStructuredMarkup(bodyWithFootnoteRefs)
+        if (footnotes.isEmpty()) {
+            return text
+        }
+
+        val notes = footnotes
+            .joinToString("\n") { note -> "[注${note.number}] ${note.text}" }
+            .trim()
+        return listOf(text, "【注释】\n$notes")
             .filter { it.isNotBlank() }
             .joinToString("\n\n")
     }
@@ -208,17 +229,135 @@ object EpubBookLoader {
         builder.append(bodyText)
     }
 
-    private fun stripMarkup(markup: String): String {
+    private fun collectFootnotes(body: String): List<EpubFootnote> {
+        return footnoteElementRegex.findAll(body)
+            .mapIndexedNotNull { index, match ->
+                val attrs = match.groupValues[2]
+                val id = attributeValue(attrs, "id") ?: return@mapIndexedNotNull null
+                val text = stripStructuredMarkup(match.groupValues[3])
+                if (text.isBlank()) {
+                    null
+                } else {
+                    EpubFootnote(id = id, number = index + 1, text = text)
+                }
+            }
+            .toList()
+    }
+
+    private fun removeFootnoteBlocks(body: String): String {
+        return footnoteElementRegex.replace(body) { match ->
+            val id = attributeValue(match.groupValues[2], "id")
+            if (id.isNullOrBlank()) match.value else ""
+        }
+    }
+
+    private fun replaceFootnoteLinks(body: String, footnotes: List<EpubFootnote>): String {
+        if (footnotes.isEmpty()) {
+            return body
+        }
+
+        val notesById = footnotes.associateBy { it.id }
+        return anchorRegex.replace(body) { match ->
+            val attrs = match.groupValues[1]
+            val href = attributeValue(attrs, "href") ?: return@replace match.value
+            val noteId = href.substringAfterLast('#', "")
+            val note = notesById[noteId] ?: return@replace match.value
+            val label = stripInlineMarkup(match.groupValues[2]).trim()
+            val marker = "[注${note.number}]"
+            if (label.isBlank() || label == note.number.toString() || label == marker) {
+                marker
+            } else {
+                "$label$marker"
+            }
+        }
+    }
+
+    private fun stripStructuredMarkup(markup: String): String {
         return markup
             .replace(scriptStyleRegex, " ")
+            .replace(rubyRegex) { match ->
+                val text = stripInlineMarkup(match.groupValues[1] + match.groupValues[3])
+                val ruby = stripInlineMarkup(match.groupValues[2])
+                "$text（$ruby）"
+            }
+            .replace(imageRegex) { match ->
+                val alt = attributeValue(match.groupValues[1], "alt")?.trim().orEmpty()
+                if (alt.isBlank()) "\n[图片]\n" else "\n[图片：$alt]\n"
+            }
+            .replace(tableRowRegex) { match ->
+                val cells = tableCellRegex.findAll(match.groupValues[1])
+                    .map { stripInlineMarkup(it.groupValues[1]).trim() }
+                    .filter { it.isNotBlank() }
+                    .toList()
+                if (cells.isEmpty()) "\n" else "\n${cells.joinToString(" | ")}\n"
+            }
+            .replace(anyHeadingRegex) { match ->
+                val level = match.groupValues[1].toIntOrNull()?.coerceIn(1, 3) ?: 3
+                val prefix = "#".repeat(level)
+                "\n\n$prefix ${stripInlineMarkup(match.groupValues[2])}\n\n"
+            }
+            .replace(blockquoteRegex) { match ->
+                val quote = stripStructuredMarkup(match.groupValues[1])
+                    .lines()
+                    .filter { it.isNotBlank() }
+                    .joinToString("\n") { "> $it" }
+                "\n\n$quote\n\n"
+            }
+            .replace(listItemRegex) { match ->
+                "\n- ${stripStructuredMarkup(match.groupValues[1]).replace("\n", " ").trim()}"
+            }
+            .replace(strongRegex) { match ->
+                "**${stripInlineMarkup(match.groupValues[2])}**"
+            }
+            .replace(emphasisRegex) { match ->
+                "*${stripInlineMarkup(match.groupValues[2])}*"
+            }
             .replace(lineBreakRegex, "\n")
             .replace(blockTagRegex, "\n")
+            .replace(tagRegex, " ")
+            .let(::normalizeStructuredText)
+    }
+
+    private fun stripInlineMarkup(markup: String): String {
+        return markup
+            .replace(scriptStyleRegex, " ")
+            .replace(lineBreakRegex, " ")
             .replace(tagRegex, " ")
             .let(::decodeEntities)
             .replace('\u00A0', ' ')
             .replace(Regex("""[ \t\x0B\f\r]+"""), " ")
+            .trim()
+    }
+
+    private fun normalizeStructuredText(text: String): String {
+        val normalizedLines = text
+            .let(::decodeEntities)
+            .replace('\u00A0', ' ')
+            .replace(Regex("""[ \t\x0B\f\r]+"""), " ")
+            .lines()
+            .map { it.trim() }
+
+        val result = mutableListOf<String>()
+        normalizedLines.forEach { line ->
+            if (line.isBlank()) {
+                if (result.lastOrNull()?.isNotBlank() == true) {
+                    result += ""
+                }
+            } else {
+                result += line
+            }
+        }
+        return result.joinToString("\n")
             .replace(Regex("""\n{3,}"""), "\n\n")
             .trim()
+    }
+
+    private fun attributeValue(attrs: String, name: String): String? {
+        return attributeRegex.findAll(attrs)
+            .firstOrNull { it.groupValues[1].equals(name, ignoreCase = true) }
+            ?.groupValues
+            ?.getOrNull(2)
+            ?.let(::decodeEntities)
     }
 
     private fun decodeEntities(text: String): String {
@@ -251,5 +390,11 @@ object EpubBookLoader {
         "rsquo" to "’",
         "ldquo" to "“",
         "rdquo" to "”",
+    )
+
+    private data class EpubFootnote(
+        val id: String,
+        val number: Int,
+        val text: String,
     )
 }
