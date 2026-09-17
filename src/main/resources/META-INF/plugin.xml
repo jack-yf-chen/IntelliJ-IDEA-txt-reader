@@ -4,7 +4,7 @@
     <vendor>Chen</vendor>
 
     <description><![CDATA[
-        一个用于在 IntelliJ IDEA 内阅读本地 TXT 小说的轻量级插件。
+        一个用于在 IntelliJ IDEA 内阅读本地 TXT/EPUB 小说，并可内嵌 Neat Reader Web 端的轻量级插件。
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
@@ -28,8 +28,15 @@
                 id="NovelReader.Open"
                 class="com.chen.reader.OpenNovelAction"
                 text="打开阅读器"
-                description="在 Novel Reader 工具窗口中打开 TXT 小说">
+                description="在 Novel Reader 工具窗口中打开 TXT 或 EPUB 小说">
             <add-to-group group-id="NovelReader.Menu" anchor="first"/>
+        </action>
+        <action
+                id="NovelReader.OpenNeatReader"
+                class="com.chen.reader.OpenNeatReaderAction"
+                text="打开 Neat Reader"
+                description="在 Novel Reader 工具窗口中打开内嵌 Neat Reader Web 端">
+            <add-to-group group-id="NovelReader.Menu" anchor="after" relative-to-action="NovelReader.Open"/>
         </action>
         <action
                 id="NovelReader.ToggleButtonStyle"

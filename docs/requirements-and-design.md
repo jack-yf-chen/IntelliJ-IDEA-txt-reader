@@ -23,6 +23,8 @@
 - 可安装到 IntelliJ IDEA 2026.1.3 的 IntelliJ Platform 插件。
 - 可从 `Tools` 菜单打开插件。
 - 提供 `Novel Reader` 工具窗口，默认锚定在右侧。
+- 工具窗口包含“本地阅读”和“Neat Reader”两个 Tab。
+- 支持在工具窗口内嵌 Neat Reader Web 端，默认打开 `https://www.neat-reader.cn/webapp`。
 - 打开本地 `.txt` 和 `.epub` 文件。
 - 尽量正确显示中文 TXT 内容。
 - 尽量正确提取 EPUB 中 OPF spine 声明的 XHTML 正文。
@@ -54,6 +56,11 @@
 ## 交互设计
 
 插件主界面是一个名为 `Novel Reader` 的工具窗口。
+
+工具窗口 Tab：
+
+- `本地阅读`：插件自带 TXT/EPUB 阅读器。
+- `Neat Reader`：基于 IntelliJ JCEF 的内嵌浏览器，加载 Neat Reader Web 端；JCEF 不可用时显示提示并提供外部浏览器打开入口。
 
 顶部控件：
 
@@ -121,8 +128,10 @@
 
 - `OpenNovelAction`：注册到 `Tools -> Novel Reader` 子菜单，打开小说文件选择器并激活工具窗口。
 - `ToggleButtonStyleAction`：注册到 `Tools -> Novel Reader` 子菜单，在文字按钮和简略图标按钮之间切换阅读工具栏显示方式。
+- `OpenNeatReaderAction`：注册到 `Tools -> Novel Reader` 子菜单，激活工具窗口并切换到 `Neat Reader` Tab。
 - `NovelReaderToolWindowFactory`：创建工具窗口并安装阅读面板。
 - `ReaderPanel`：基于 Swing 的阅读 UI，负责文件打开、章节导航、阅读样式控制和状态保存。
+- `NeatReaderPanel`：基于 JCEF 的网页阅读面板，内嵌 Neat Reader Web 端，并提供 Web 端、官网和外部浏览器打开入口。
 - `BookLoader`：按文件扩展名分发到具体读取器。
 - `TxtBookLoader`：TXT 文件读取器，支持编码回退。
 - `EpubBookLoader`：EPUB 文件读取器，解析 `container.xml`、OPF manifest 和 spine，按阅读顺序提取 XHTML 正文。
@@ -223,3 +232,4 @@ EPUB 解析策略：
 - 2026-09-14：将插件版本号提升到 `0.3.2`，修复阅读记忆恢复被同书打开重置或初始化布局回写覆盖的问题。
 - 2026-09-16：将插件版本号提升到 `0.4.0`，增加 EPUB 本地阅读支持，按 OPF spine 顺序解析 XHTML 正文并复用现有阅读器、章节导航、进度和阅读记忆能力。
 - 2026-09-16：将插件版本号提升到 `0.4.1`，增强 EPUB 脚注和基础复杂排版还原，支持脚注汇总、标题、列表、引用、表格、图片 alt、ruby 注音和强调文本的纯文本结构化展示。
+- 2026-09-17：将插件版本号提升到 `0.4.2`，新增 `Neat Reader` 工具窗口 Tab，使用 JCEF 内嵌 `https://www.neat-reader.cn/webapp`，并增加 `Tools -> Novel Reader -> 打开 Neat Reader` 菜单入口。

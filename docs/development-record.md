@@ -61,8 +61,10 @@
 - `src/main/kotlin/com/chen/reader/ChapterParser.kt`
 - `src/main/kotlin/com/chen/reader/BookLoader.kt`
 - `src/main/kotlin/com/chen/reader/EpubBookLoader.kt`
+- `src/main/kotlin/com/chen/reader/NeatReaderPanel.kt`
 - `src/main/kotlin/com/chen/reader/NovelReaderOpener.kt`
 - `src/main/kotlin/com/chen/reader/NovelReaderToolWindowFactory.kt`
+- `src/main/kotlin/com/chen/reader/OpenNeatReaderAction.kt`
 - `src/main/kotlin/com/chen/reader/OpenNovelAction.kt`
 - `src/main/kotlin/com/chen/reader/ReaderPanel.kt`
 - `src/main/kotlin/com/chen/reader/ReaderStateService.kt`
@@ -126,6 +128,7 @@
 - 2026-09-14：将插件版本号提升到 `0.3.2`。修复重启电脑或重新打开同一本 TXT 后阅读记忆失效的问题：打开文件时先判断是否为上次阅读的同一本书，同书打开不再清空章节、全书 offset 和锚点；恢复滚动位置时如果工具窗口尚未完成布局，则延迟到滚动范围可用后再定位，避免初始化阶段把阅读位置误写回开头。
 - 2026-09-16：将插件版本号提升到 `0.4.0`。增加 EPUB 格式支持：通过 `BookLoader` 统一分发 TXT/EPUB，EPUB 读取器解析 `container.xml`、OPF manifest 和 spine，按阅读顺序提取 XHTML 正文并生成章节；现有虚拟阅读、章节导航、进度、划词查词和阅读记忆能力继续复用。
 - 2026-09-16：将插件版本号提升到 `0.4.1`。增强 EPUB 脚注和复杂排版的纯文本还原：正文脚注链接显示为 `[注N]`，章节末尾追加“【注释】”；标题、列表、引用、表格、图片 alt、ruby 注音、粗体和斜体会转换为更可读的纯文本结构。
+- 2026-09-17：将插件版本号提升到 `0.4.2`。工具窗口新增“Neat Reader”Tab，使用 IntelliJ JCEF 内嵌 `https://www.neat-reader.cn/webapp`；新增 `Tools -> Novel Reader -> 打开 Neat Reader` 菜单入口；JCEF 不可用时在 Tab 内提示并提供外部浏览器打开入口。
 
 ## 后续验证步骤
 
@@ -150,6 +153,9 @@ build/distributions/
 手动冒烟验证：
 
 - 确认 `Tools -> Novel Reader` 可见。
+- 确认工具窗口存在“本地阅读”和“Neat Reader”两个 Tab。
+- 确认 `Tools -> Novel Reader -> 打开 Neat Reader` 能切换到内嵌网页阅读器。
+- 确认 Neat Reader Tab 能打开 `https://www.neat-reader.cn/webapp`，JCEF 不可用时能提示并用外部浏览器打开。
 - 打开 UTF-8 TXT 文件。
 - 打开 GBK 或 GB18030 中文 TXT 文件。
 - 打开 EPUB 文件，确认能按电子书阅读顺序显示正文。

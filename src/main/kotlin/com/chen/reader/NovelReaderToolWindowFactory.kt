@@ -7,10 +7,15 @@ import com.intellij.ui.content.ContentFactory
 
 class NovelReaderToolWindowFactory : ToolWindowFactory {
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
-        val panel = ReaderPanel(project)
-        val content = ContentFactory.getInstance().createContent(panel, "", false)
-        toolWindow.contentManager.addContent(content)
-        panel.restoreLastBook()
+        val contentFactory = ContentFactory.getInstance()
+        val readerPanel = ReaderPanel(project)
+        val readerContent = contentFactory.createContent(readerPanel, "本地阅读", false)
+        toolWindow.contentManager.addContent(readerContent)
+
+        val neatReaderPanel = NeatReaderPanel(project)
+        val neatReaderContent = contentFactory.createContent(neatReaderPanel, "Neat Reader", false)
+        toolWindow.contentManager.addContent(neatReaderContent)
+
+        readerPanel.restoreLastBook()
     }
 }
-

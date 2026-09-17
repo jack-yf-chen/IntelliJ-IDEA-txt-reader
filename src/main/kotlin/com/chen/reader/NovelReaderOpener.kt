@@ -37,7 +37,21 @@ object NovelReaderOpener {
         }
 
         toolWindow.activate {
-            findReaderPanel(toolWindow)?.openBook(path)
+            findReaderPanel(toolWindow)?.let { panel ->
+                panel.openBook(path)
+            }
+        }
+    }
+
+    fun openNeatReader(project: Project) {
+        val toolWindow = ToolWindowManager.getInstance(project).getToolWindow(TOOL_WINDOW_ID)
+        if (toolWindow == null) {
+            Messages.showErrorDialog(project, "无法找到 Novel Reader 工具窗口。", "Novel Reader")
+            return
+        }
+
+        toolWindow.activate {
+            selectNeatReaderPanel(toolWindow)
         }
     }
 
@@ -46,9 +60,20 @@ object NovelReaderOpener {
         for (content in contentManager.contents) {
             val component = content.component
             if (component is ReaderPanel) {
+                contentManager.setSelectedContent(content)
                 return component
             }
         }
         return null
+    }
+
+    private fun selectNeatReaderPanel(toolWindow: com.intellij.openapi.wm.ToolWindow) {
+        val contentManager = toolWindow.contentManager
+        for (content in contentManager.contents) {
+            if (content.component is NeatReaderPanel) {
+                contentManager.setSelectedContent(content)
+                return
+            }
+        }
     }
 }
