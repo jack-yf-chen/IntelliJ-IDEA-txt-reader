@@ -2,7 +2,7 @@
 
 Novel Reader 是一个用于 IntelliJ IDEA 的轻量级本地小说阅读插件，目标是在不离开 IDE 的情况下完成本地小说阅读、章节导航、阅读样式调整和划词查词。
 
-当前版本：`0.4.2`
+当前版本：`0.4.3`
 
 ## 目标环境
 
@@ -15,6 +15,7 @@ Novel Reader 是一个用于 IntelliJ IDEA 的轻量级本地小说阅读插件�
 - `Tools -> Novel Reader` 菜单入口。
 - 右侧 `Novel Reader` 工具窗口，包含“本地阅读”和“Neat Reader”两个 Tab。
 - 内嵌 Neat Reader Web 端，默认打开 `https://www.neat-reader.cn/webapp`，并提供官网和外部浏览器打开入口。
+- Neat Reader 内嵌页支持按工具窗口宽度自动缩放，并拦截新窗口请求，避免云端下载或打开书籍时弹出空白窗口。
 - TXT 文件读取，支持 UTF-8、GB18030、GBK 编码回退。
 - EPUB 文件读取，支持按 OPF spine 顺序提取 XHTML 正文并生成章节导航。
 - EPUB 脚注和基础复杂排版还原：脚注引用、章节末尾注释、标题、列表、引用、表格、图片 alt、ruby 注音和强调文本会转成更适合纯文本阅读的结构。

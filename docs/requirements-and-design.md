@@ -61,6 +61,8 @@
 
 - `本地阅读`：插件自带 TXT/EPUB 阅读器。
 - `Neat Reader`：基于 IntelliJ JCEF 的内嵌浏览器，加载 Neat Reader Web 端；JCEF 不可用时显示提示并提供外部浏览器打开入口。
+- `Neat Reader` Tab 按工具窗口宽度自动调整网页缩放，并提供缩小、自适应和放大按钮。
+- `Neat Reader` Tab 拦截 `window.open` 和 `target="_blank"` 新窗口请求，优先在当前内嵌 Tab 打开，避免弹出空白窗口。
 
 顶部控件：
 
@@ -233,3 +235,4 @@ EPUB 解析策略：
 - 2026-09-16：将插件版本号提升到 `0.4.0`，增加 EPUB 本地阅读支持，按 OPF spine 顺序解析 XHTML 正文并复用现有阅读器、章节导航、进度和阅读记忆能力。
 - 2026-09-16：将插件版本号提升到 `0.4.1`，增强 EPUB 脚注和基础复杂排版还原，支持脚注汇总、标题、列表、引用、表格、图片 alt、ruby 注音和强调文本的纯文本结构化展示。
 - 2026-09-17：将插件版本号提升到 `0.4.2`，新增 `Neat Reader` 工具窗口 Tab，使用 JCEF 内嵌 `https://www.neat-reader.cn/webapp`，并增加 `Tools -> Novel Reader -> 打开 Neat Reader` 菜单入口。
+- 2026-09-17：将插件版本号提升到 `0.4.3`，优化 Neat Reader 内嵌网页适配：根据工具窗口宽度自动缩放，提供手动缩放按钮，并拦截新窗口请求在当前 Tab 打开，避免云端下载或打开书籍时弹出空白窗口。
