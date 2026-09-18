@@ -164,10 +164,10 @@ class NeatReaderPanel(project: Project) : JPanel(BorderLayout()), Disposable {
 
         val width = browser?.component?.width?.takeIf { it > 0 } ?: width
         val zoomLevel = when {
-            width <= 560 -> -2.6
-            width <= 720 -> -2.2
-            width <= 900 -> -1.8
-            width <= 1100 -> -1.4
+            width <= 560 -> -0.8
+            width <= 720 -> -0.6
+            width <= 900 -> -0.4
+            width <= 1100 -> -0.2
             else -> DEFAULT_ZOOM_LEVEL
         }
         applyZoom(zoomLevel)
@@ -175,11 +175,7 @@ class NeatReaderPanel(project: Project) : JPanel(BorderLayout()), Disposable {
 
     private fun applyZoom(zoomLevel: Double) {
         currentZoomLevel = zoomLevel
-        val jcefBrowser = browser
-        jcefBrowser?.zoomLevel = 0.0
-        jcefBrowser?.let {
-            injectViewportFitScript(it)
-        }
+        browser?.zoomLevel = zoomLevel
         zoomLabel.text = "缩放 ${zoomPercent(zoomLevel)}%"
     }
 
@@ -208,95 +204,6 @@ class NeatReaderPanel(project: Project) : JPanel(BorderLayout()), Disposable {
                 jcefBrowser.cefBrowser.url ?: NEAT_READER_WEB_APP_URL,
                 0,
             )
-            injectViewportFitScript(jcefBrowser)
-        }
-    }
-
-    private fun injectViewportFitScript(jcefBrowser: JBCefBrowser) {
-        val preferredScale = Math.pow(ZOOM_BASE, currentZoomLevel)
-        SwingUtilities.invokeLater {
-            jcefBrowser.runJavaScript(
-                """
-                (function () {
-                  const preferredScale = ${"%.4f".format(java.util.Locale.US, preferredScale)};
-                  const minScale = ${"%.2f".format(java.util.Locale.US, MIN_PAGE_SCALE)};
-                  const viewportPadding = 16;
-
-                  function ensureViewportMeta() {
-                    let meta = document.querySelector('meta[name="viewport"]');
-                    if (!meta) {
-                      meta = document.createElement('meta');
-                      meta.setAttribute('name', 'viewport');
-                      document.head && document.head.appendChild(meta);
-                    }
-                    meta.setAttribute('content', 'width=device-width, initial-scale=1, maximum-scale=1');
-                  }
-
-                  function installStyle() {
-                    let style = document.getElementById('__novelReaderFitStyle');
-                    if (!style) {
-                      style = document.createElement('style');
-                      style.id = '__novelReaderFitStyle';
-                      document.head && document.head.appendChild(style);
-                    }
-                    style.textContent = `
-                      html {
-                        overflow-x: hidden !important;
-                        max-width: 100vw !important;
-                      }
-                      body {
-                        overflow-x: hidden !important;
-                        transform-origin: 0 0 !important;
-                      }
-                    `;
-                  }
-
-                  function resetZoom() {
-                    document.body.style.zoom = '1';
-                    document.body.style.width = '100%';
-                    document.body.style.minWidth = '0';
-                    document.documentElement.style.minWidth = '0';
-                  }
-
-                  function naturalWidth() {
-                    const candidates = [
-                      document.documentElement.scrollWidth,
-                      document.body.scrollWidth,
-                      document.documentElement.offsetWidth,
-                      document.body.offsetWidth
-                    ];
-                    document.querySelectorAll('body > *, #app, .app, .container, .main, .content').forEach(function (element) {
-                      candidates.push(element.scrollWidth || 0);
-                      candidates.push(element.offsetWidth || 0);
-                    });
-                    return Math.max.apply(null, candidates.filter(Boolean));
-                  }
-
-                  function fit() {
-                    if (!document.body || !document.documentElement) return;
-                    ensureViewportMeta();
-                    installStyle();
-                    resetZoom();
-                    const viewportWidth = Math.max(320, window.innerWidth - viewportPadding);
-                    const measuredWidth = Math.max(viewportWidth, naturalWidth());
-                    const fitScale = Math.max(minScale, Math.min(preferredScale, viewportWidth / measuredWidth));
-                    document.body.style.zoom = String(fitScale);
-                    document.body.style.width = (100 / fitScale) + '%';
-                    document.documentElement.style.overflowX = 'hidden';
-                    document.body.style.overflowX = 'hidden';
-                  }
-
-                  fit();
-                  clearTimeout(window.__novelReaderFitTimer);
-                  window.__novelReaderFitTimer = setTimeout(fit, 120);
-                  window.removeEventListener('resize', window.__novelReaderFitHandler || function () {});
-                  window.__novelReaderFitHandler = fit;
-                  window.addEventListener('resize', fit);
-                })();
-                """.trimIndent(),
-                jcefBrowser.cefBrowser.url ?: NEAT_READER_WEB_APP_URL,
-                0,
-            )
         }
     }
 
@@ -311,11 +218,10 @@ class NeatReaderPanel(project: Project) : JPanel(BorderLayout()), Disposable {
     companion object {
         const val NEAT_READER_HOME_URL = "https://www.neat-reader.cn/"
         const val NEAT_READER_WEB_APP_URL = "https://www.neat-reader.cn/webapp"
-        private const val DEFAULT_ZOOM_LEVEL = -1.2
-        private const val MIN_ZOOM_LEVEL = -3.0
+        private const val DEFAULT_ZOOM_LEVEL = 0.0
+        private const val MIN_ZOOM_LEVEL = -2.0
         private const val MAX_ZOOM_LEVEL = 1.0
         private const val ZOOM_STEP = 0.4
         private const val ZOOM_BASE = 1.2
-        private const val MIN_PAGE_SCALE = 0.35
     }
 }
