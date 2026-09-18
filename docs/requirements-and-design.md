@@ -61,7 +61,7 @@
 
 - `本地阅读`：插件自带 TXT/EPUB 阅读器。
 - `Neat Reader`：基于 IntelliJ JCEF 的内嵌浏览器，加载 Neat Reader Web 端；JCEF 不可用时显示提示并提供外部浏览器打开入口。
-- `Neat Reader` Tab 按工具窗口宽度自动调整网页缩放，并提供缩小、自适应和放大按钮。
+- `Neat Reader` Tab 按工具窗口宽度自动适配网页版式，并提供缩小、自适应和放大按钮。
 - `Neat Reader` Tab 拦截 `window.open` 和 `target="_blank"` 新窗口请求，优先在当前内嵌 Tab 打开，避免弹出空白窗口。
 
 顶部控件：
@@ -133,7 +133,7 @@
 - `OpenNeatReaderAction`：注册到 `Tools -> Novel Reader` 子菜单，激活工具窗口并切换到 `Neat Reader` Tab。
 - `NovelReaderToolWindowFactory`：创建工具窗口并安装阅读面板。
 - `ReaderPanel`：基于 Swing 的阅读 UI，负责文件打开、章节导航、阅读样式控制和状态保存。
-- `NeatReaderPanel`：基于 JCEF 的网页阅读面板，内嵌 Neat Reader Web 端，并提供 Web 端、官网和外部浏览器打开入口。
+- `NeatReaderPanel`：基于 JCEF 的网页阅读面板，内嵌 Neat Reader Web 端，并提供 Web 端、官网、外部浏览器打开入口和页面级宽度适配。
 - `BookLoader`：按文件扩展名分发到具体读取器。
 - `TxtBookLoader`：TXT 文件读取器，支持编码回退。
 - `EpubBookLoader`：EPUB 文件读取器，解析 `container.xml`、OPF manifest 和 spine，按阅读顺序提取 XHTML 正文。
@@ -236,3 +236,4 @@ EPUB 解析策略：
 - 2026-09-16：将插件版本号提升到 `0.4.1`，增强 EPUB 脚注和基础复杂排版还原，支持脚注汇总、标题、列表、引用、表格、图片 alt、ruby 注音和强调文本的纯文本结构化展示。
 - 2026-09-17：将插件版本号提升到 `0.4.2`，新增 `Neat Reader` 工具窗口 Tab，使用 JCEF 内嵌 `https://www.neat-reader.cn/webapp`，并增加 `Tools -> Novel Reader -> 打开 Neat Reader` 菜单入口。
 - 2026-09-17：将插件版本号提升到 `0.4.3`，优化 Neat Reader 内嵌网页适配：根据工具窗口宽度自动缩放，提供手动缩放按钮，并拦截新窗口请求在当前 Tab 打开，避免云端下载或打开书籍时弹出空白窗口。
+- 2026-09-18：将插件版本号提升到 `0.4.4`，Neat Reader 适配从 JCEF 浏览器级缩放改为页面级宽度适配，解决网页固定版式在窄窗口下无法完整显示的问题。
