@@ -167,7 +167,6 @@ class NeatReaderPanel(project: Project) : JPanel(BorderLayout()), Disposable {
             width <= 560 -> -0.8
             width <= 720 -> -0.6
             width <= 900 -> -0.4
-            width <= 1100 -> -0.2
             else -> DEFAULT_ZOOM_LEVEL
         }
         applyZoom(zoomLevel)
@@ -218,7 +217,7 @@ class NeatReaderPanel(project: Project) : JPanel(BorderLayout()), Disposable {
     companion object {
         const val NEAT_READER_HOME_URL = "https://www.neat-reader.cn/"
         const val NEAT_READER_WEB_APP_URL = "https://www.neat-reader.cn/webapp"
-        private const val DEFAULT_ZOOM_LEVEL = 0.0
+        private const val DEFAULT_ZOOM_LEVEL = -0.2
         private const val MIN_ZOOM_LEVEL = -2.0
         private const val MAX_ZOOM_LEVEL = 1.0
         private const val ZOOM_STEP = 0.4
