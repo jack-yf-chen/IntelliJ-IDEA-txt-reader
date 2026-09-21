@@ -1,6 +1,9 @@
 package com.chen.reader
 
+import com.chen.reader.book.EmptyResources
 import com.chen.reader.model.Book
+import com.chen.reader.model.LineStyle
+import com.chen.reader.model.TextBlock
 import java.io.InputStreamReader
 import java.nio.charset.CharacterCodingException
 import java.nio.charset.Charset
@@ -30,9 +33,12 @@ object TxtBookLoader {
                 val content = readStrict(path, charset).removePrefix("\uFEFF")
                 return Book(
                     path = path,
-                    content = content,
                     charset = charset,
+                    // TXT 没有内嵌资源，正文整体就是一个 TextBlock：
+                    // 块的区间覆盖全文，`plainText` 与旧实现的 `content` 完全一致。
+                    blocks = listOf(TextBlock(0, content.length, content, LineStyle.BODY)),
                     chapters = ChapterParser.parse(content),
+                    resources = EmptyResources,
                 )
             } catch (error: CharacterCodingException) {
                 errors += "${charset.name()}: ${error.message ?: "decode failed"}"

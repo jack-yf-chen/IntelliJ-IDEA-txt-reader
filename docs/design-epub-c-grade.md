@@ -951,4 +951,241 @@ graph TD
 
 ---
 
+## 14. 脚注识别策略修订（基于真实 EPUB 数据）
+
+> 触发：用户安装 0.4.7 后阅读 `作为意志和表象的世界 (叔本华).epub`（EPUB 2 风格，12 个 spine item + 11 张 jpg），反馈**图片加载不出来、注释引用无法点击**。team-lead 解析该 zip 后发现真实脚注结构与本文 §4 的假设不符，本节据此修订 §4 与 §9.1。
+
+### 14.1 真实数据结构
+
+```html
+<!-- 正文引用点，通常在 <sup> 内 -->
+<sup> <a id="sd1e17" href="text00003.html#d1e17">[1]</a> </sup>
+
+<!-- 章末注释条目，注释正文紧跟 </a> 之后、同一 <p> 内 -->
+<p style="text-indent:2em;">
+  <a id="d1e17" href="text00003.html#sd1e17">[1]</a>
+  六角括号内的话系译者所加，下同。——编者注
+</p>
+```
+
+结构特征：`<a id="sXXX" href="#dXXX">` ↔ `<a id="dXXX" href="#sXXX">` **互为镜像**（`s`/`d` 前缀互指），锚文本 `[N]`。**没有 `epub:type="footnote"`，没有 `class="footnote"`，id 也不是 `fn*` 前缀。**
+
+### 14.2 现有代码的盲区（逐条证据）
+
+| # | 盲区 | 证据 | 后果 |
+|---|---|---|---|
+| B1 | 只认三种语义标志 | `EpubBookLoader.kt:26–28` `footnoteElementRegex` 的三选一：`epub:type` 含 `footnote\|endnote\|note`、`class` 含 `footnote\|endnote\|annotation\|fn`、`id` 含 `footnote\|endnote\|annotation\|fn` | 样本的 `id="sd1e17"` / `id="d1e17"` **三条全不匹配**（不含 `fn` 子串）→ `collectFootnotes:233` 返回空列表 |
+| B2 | 还要求载体元素自带 `id`，且标签限 5 种 | `:27` 标签白名单 `aside\|section\|div\|li\|p`；`:236` `val id = attributeValue(attrs, "id") ?: return@mapIndexedNotNull null` | 样本注释载体是 `<p style="text-indent:2em;">`，**无 id 无 class** → 直接早退 |
+| B3 | 空脚注集时整条链路短路 | `:254–257` `if (footnotes.isEmpty()) return body` | 所有 `<a>` 原样保留 → `stripStructuredMarkup:317` 用 `tagRegex` 抹掉标签 → **`[1]` 退化成普通文本**。这正是用户看到的现象 |
+| B4 | 编号用位置序号而非锚文本数字 | `:241` `EpubFootnote(id = id, number = index + 1, ...)` | 即使语义通道命中，书里标号是 `[3]` 时插件渲染成 `[注1]`，**序号与原文错位** |
+| B5 | 正则通道的固有截断缺陷 | `:28` `(.*?)</\1>` 非贪婪 + 反向引用；`:247–252` `removeFootnoteBlocks` 复用同一正则做删除 | 嵌套同名标签会提前闭合；`<div class="footnote">` 包裹多个 `<p>` 时会在第一个 `</div>` 截断 → 注释文本被截断、甚至误删正文 |
+| B6 | **逐篇独立处理，跨文件互指无法判定** | `:49` `val documents = spineIds.mapNotNull { ... }` 只取 spine；`:57–76` `documents.forEachIndexed { ... }` 每篇只看到自己的 markup | 注释若在独立 `notes.xhtml`，互指判定**结构上不可能成立** |
+
+**结论：现有实现只有"语义通道"一条路径，而它依赖生成器写语义标志。这本书没写 → 全军覆没。**
+
+### 14.3 推荐识别算法
+
+#### 14.3.1 核心判据：双向互指（不依赖任何命名前缀）
+
+> **一句话规则**：若文档中两个 `<a>` 元素满足 `A.id == B.href 的 fragment` 且 `B.id == A.href 的 fragment`（且文件部分互相指向对方），则判定为一对脚注引用/注释。
+
+这条规则**只依赖图结构，与 `s`/`d`、`fn`/`fnref`、`note`/`noteref` 等任何命名习惯无关**，因此能同时覆盖：
+
+| 生成器常见习惯 | 是否命中互指规则 |
+|---|---|
+| 本书 `sd1e17` ↔ `d1e17` | ✓ |
+| pandoc `cite_ref-1` ↔ `cite_note-1` | ✓ |
+| MediaWiki `fnref1` ↔ `fn1` | ✓（pandoc 常带 `↩` 回链） |
+| `footnote-ref-1` ↔ `footnote-1` | ✓ |
+| `noteref1` ↔ `note1` | ✓ |
+
+**互指规则不是万能的**：部分生成器只有单向链接（引用侧 `href="#fn1"`，注释侧无回链）。因此还需要一条**弱判定**兜底（见 14.3.3）。
+
+#### 14.3.2 中间数据结构（加载期，不进入 `Block`）
+
+```kotlin
+// EpubBookLoader 私有，仅用于识别阶段
+private data class AnchorKey(val docId: String, val id: String)
+
+private data class AnchorRef(
+    val docId: String,          // 文档在 manifest 中的规范化路径（复用 :143–158 normalizeZipPath）
+    val ordInDoc: Int,          // DOM 遍历中 <a> 的出现序号 —— 元素唯一身份，用于两通道去重
+    val id: String?,
+    val hrefDocId: String?,     // href 的文件部分；null = 同文档
+    val hrefFragment: String?,  // href 的 # 之后部分
+    val label: String,          // 去标签后的锚文本，如 "[1]"
+    val inSup: Boolean,         // 是否被 <sup> 包裹
+    val tailRatio: Int,         // 所在块级元素在本文档中的位置百分比 0..100（用于判定"文末"）
+)
+
+private class GlobalAnchorIndex(
+    val all: List<AnchorRef>,
+    val byKey: Map<AnchorKey, AnchorRef>,
+    val docIsSpine: Set<String>,
+) {
+    /** 双向互指：决定性判据，与命名前缀无关 */
+    fun counterpartOf(a: AnchorRef): AnchorRef? {
+        val frag = a.hrefFragment ?: return null
+        val targetDoc = a.hrefDocId ?: a.docId
+        val b = byKey[AnchorKey(targetDoc, frag)] ?: return null
+        val bTargetDoc = b.hrefDocId ?: b.docId
+        val mutual = b.hrefFragment == a.id && bTargetDoc == a.docId
+        return if (mutual) b else null
+    }
+}
+```
+
+#### 14.3.3 判据权重与仲裁
+
+**正向判据（加权）**
+
+| 判据 | 说明 | 权重 |
+|---|---|---|
+| **P1 双向互指** | `counterpartOf()` 非空 | **决定性**（单独即可判定） |
+| **P2 序号式锚文本** | `label` 匹配 `^\[?\d{1,3}\]?$`、`[注N]`、`①`、`*`、`†` | 强 |
+| **P3 `<sup>` 包裹** | 判定"引用侧" | 强（仅用于分侧，不单独判定） |
+| **P4 目标位于文末** | `tailRatio >= 80` 或目标块在文档最后一个块级元素之后 | 中强 |
+| **P5 目标是独立注释文件** | 文件名匹配 `notes\|note\|endnote\|footnote\|biblio\|注释` | 中 |
+| **P6 命名习惯线索** | id/fragment 含 `fn\|footnote\|endnote\|note\|ref` | **弱，仅作加权/兜底**（现有 `:26–28` 正是把它当唯一判据才失效） |
+| **P7 回链符号** | 注释侧锚文本为 `↩` `↵` `↑` `返回` `back` | 中（用于确认注释侧） |
+
+**判定顺序**
+
+1. **先跑排除规则（14.4）**，命中任一条即剔除（一票否决）。
+2. **强判定**：P1 成立 → 判定为脚注对。
+3. **弱判定**（无 P1）：P2 成立 **且**（P3 或 P4 或 P5 至少一个成立）→ 判定为单向脚注（pandoc 无回链风格）。
+4. **兜底**：仅 P6 成立 → **不判定**（避免重蹈 `:26–28` 的覆辙）。
+
+**判定哪一侧是"注释"**
+
+```
+noteSide = when {
+    a.inSup != b.inSup            -> 不在 <sup> 内的一侧        // 样本命中此条
+    a.tailRatio != b.tailRatio    -> tailRatio 更大的一侧        // 更靠文末的是注释
+    else                          -> ordInDoc 更大的一侧
+}
+```
+
+**注释正文提取**：取注释侧锚点所在的**块级父元素**文本，**剥掉锚文本自身**。
+样本：`<p><a …>[1]</a> 六角括号内的话系译者所加，下同。——编者注</p>` → body = `六角括号内的话系译者所加，下同。——编者注` ✓
+
+**编号解析**：`^\[?(\d{1,3})\]?$` 从 `label` 提取；解析失败回退到文档内出现序号。
+> 这一条顺带修复 B4：现状 `:241` 用位置序号导致"书里是 `[3]`、插件显示 `[注1]`"。
+
+### 14.4 排除规则清单（防误判）
+
+EPUB 里内部链接远多于脚注，必须显式排除。以下**任一命中即剔除**：
+
+| # | 排除项 | 判定 | 为什么必须排除 |
+|---|---|---|---|
+| **N1** | **目录（TOC）页链接** | 文档被 `<nav>` 包裹 / `epub:type="toc"` / 文件名匹配 `toc\|nav\|contents\|目录`；**或**单文档内 ≥ 5 个链接且**大多数指向别的 spine 文档的根**（fragment 为空或指向文档顶部） | TOC 是全书内部链接密度最高的地方，不排除会产生成百上千个假脚注 |
+| **N2** | **正文交叉引用** | `label.length > 12`，或含 `见\|参见\|第.{1,4}章\|如下\|上文\|下文` | 脚注标号一定是短标记，长文本链接必然是交叉引用 |
+| **N3** | **"返回正文"回链** | `label` 匹配 `返回\|回正文\|back\|↑\|↩\|↵` | 这是注释侧指向引用侧的回链，属于注释的**组成部分**，本身不是脚注 → 生成注释正文时**整段剥掉** |
+| **N4** | **外部链接** | `href` 以 `http://` `https://` `mailto:` 开头 | 非内部锚点 |
+| **N5** | **图片链接** | `<a>` 内只有 `<img>` 而无文本 | 无 label，无法生成序号标记 |
+| **N6** | **悬空链接** | `hrefFragment` 在全局索引中找不到对应 `id` | 目标不存在的链接不是脚注 |
+| **N7** | **自指** | `a.id == a.hrefFragment` 且无 counterpart | 防止把自身锚点当脚注 |
+
+### 14.5 边界情况处理
+
+| 情形 | 处理 |
+|---|---|
+| **多对一**（同一注释被引用 2 次） | 生成 **2 个 `FootnoteRefBlock`**（各有独立 `plainStart/plainEnd`）+ **2 个 `FootnoteHotSpot`**，共享同一 `footnoteId` 与同一份 `body`。弹窗数据仍自足（§14.7） |
+| **一对多**（一个引用指向多个候选注释） | 取 `tailRatio` 最大的一个；若歧义不可解，降级为纯文本（不生成 HotSpot），并记录一条 debug 日志 |
+| **孤儿注释**（注释从未被引用） | 仍生成 `FootnoteBodyBlock`（用户能读到），但**不生成 `FootnoteHotSpot`**（正文里没有可点的引用点） |
+| **悬空引用**（引用指向不存在的 id） | N6 已剔除 → 降级为普通文本 |
+| **跨文件注释**（问题 3 的答案） | **双向互指判定仍然成立**，但需两个前提：① 全局 id 索引覆盖 **manifest 中所有 XHTML**（不限于 spine，见 `:49` 的限制）；② href 的文件部分解析到 `docId`（复用 `:143–158` `normalizeZipPath`）。**注意 `id` 只在单文档内唯一，跨文档会重复 → key 必须是 `(docId, id)`** |
+| **注释在独立 `notes.xhtml`** | 引用侧照常生成 `FootnoteRefBlock` + 弹窗（`body` 从该文档取）；但**不把注释搬进正文**——否则整份 `notes.xhtml` 会被复制进每一章。渲染规则：跨文件注释只在 `FootnoteBodyBlock` 所在文档渲染一次；该文档若不在 spine，则**只供弹窗使用，不进正文** |
+| **同文件注释** | 沿用现状行为（`EpubBookLoader.kt:216–221`）：从正文移除，追加到该 spine item 末尾的「【注释】」段落 |
+
+### 14.6 两通道并存与去重
+
+| 通道 | 来源 | 优先级 |
+|---|---|---|
+| **通道 A（语义通道）** | 现有 `:26–28` 正则 / 建议改为 DOM 遍历后等价的语义判定（`epub:type`、`class`、`id` 含脚注语义） | **最高**（0.4.1 以来对标准 EPUB 的支持，必须保留） |
+| **通道 B（结构通道）** | 新增：双向互指 + 序号锚点弱判定 | 次高 |
+
+**去重机制**：以**元素身份**为单位，`ElementKey = (docId, ordInDoc)`。
+
+```
+1. 通道 A 先跑，把命中的元素登记进 claimedKeys
+2. 通道 B 只处理 counterpart/anchor 的 ordInDoc 不在 claimedKeys 中的元素
+3. 反向亦然：若通道 B 先成对，通道 A 再命中同一元素则跳过
+4. 编号统一：优先用 label 解析出的数字，解析失败才用出现序号（修复 B4）
+```
+
+**建议顺带把通道 A 从正则改为 DOM 遍历**（理由见 B5）：`:28` 的 `(.*?)</\1>` 在嵌套同名标签时会截断，`:247–252` 的删除会连带删错正文。项目已有 `parseXml`（`:160–172`）与安全配置（`:164–167`）可直接复用。
+
+### 14.7 数据模型修订
+
+`Book` / `Block` 整体结构**不变**，只需给脚注三兄弟补字段：
+
+```kotlin
+/** 正文中的脚注引用标记。新增 label（原始锚文本）与解析出的 number */
+data class FootnoteRefBlock(
+    override val plainStart: Int,
+    override val plainEnd: Int,
+    val footnoteId: String,      // 全局唯一："$noteDocId#$noteId"
+    val number: Int,             // 由 label "[1]" 解析；解析失败回落出现序号
+    val label: String,           // 原文标记，如 "[1]"，用于渲染时保留原貌
+) : Block
+
+/** 章末注释条目。弹窗方案下**不是跳转目标**，仅用于差异化渲染 */
+data class FootnoteBodyBlock(
+    override val plainStart: Int,
+    override val plainEnd: Int,
+    val footnoteId: String,
+    val number: Int,
+    val text: String,            // 已剥掉锚文本与回链符号
+) : Block
+
+/** 脚注热区：左键 → 弹窗。body 内嵌，弹窗数据自足 */
+data class FootnoteHotSpot(
+    override val plainStart: Int,
+    override val plainEnd: Int,
+    val footnoteId: String,
+    val number: Int,
+    val label: String,           // 弹窗标题用，如 "[1]"
+    val body: String,            // 注释正文（多对一时多个热区共享同一份）
+) : HotSpot
+```
+
+> 变化点只有两处：`FootnoteRefBlock` 增加 `label`；`FootnoteHotSpot` 增加 `label`。`FootnoteBodyBlock` 定义不变，只是 `text` 的提取规则更严格（要剥掉锚文本与回链符号）。**§4.1 类图与 §4.2 其余类型不受影响。**
+
+### 14.8 对任务分解（§9.1 T32）的修订
+
+T32 由 1 个任务拆为 4 个：
+
+| ID | 任务名 | 涉及文件 | 依赖 | 工时 |
+|---|---|---|---|---|
+| T32a | **全局 anchor 索引 pre-pass**：覆盖 manifest 全部 XHTML（不只 spine），DOM 遍历收集 `AnchorRef`，构建 `GlobalAnchorIndex`；href 文件部分复用 `normalizeZipPath:143–158` | `EpubBookLoader.kt` | T30 | 0.6 |
+| T32b | **双向互指判定 + 排除规则 N1–N7 + 权重仲裁**（P1–P7、分侧、注释正文提取、编号解析） | 新增 `book/FootnoteDetector.kt` | T32a | 0.8 |
+| T32c | **两通道去重 + 通道 A 改 DOM 遍历**（顺带修 B5 嵌套截断）+ 编号统一为 label 数字（修 B4） | `EpubBookLoader.kt` | T32b | 0.5 |
+| T32d | **边界与单测**：多对一 / 孤儿 / 悬空 / 跨文件 / 非 spine 注释文件 / TOC 页不误判 | `src/test/kotlin/...`（用team-lead 提供的叔本华 EPUB 结构做 fixture） | T32c | 0.6 |
+| T32（原） | `EpubBookLoader` 结构化改造：manifest 收集图片/SVG、`<img>` → ImageBlock/InlineImageBlock、figure/figcaption | `EpubBookLoader.kt` | T30, T31 | 1.2 |
+
+**T32 小计：1.2 → 3.7 天（+2.5 天）**
+
+#### 工期影响
+
+| 项 | 原 | 修订后 |
+|---|---|---|
+| §10.1 数据层（T30+T31+T32+T33） | 2.9 | **5.4** |
+| **C 档总计** | 16.5 天 | **19.0 天** |
+| C − 行内图 | 15.5 天 | **18.0 天** |
+| C − 行内图 − 增值项 | 14.7 天 | **17.2 天** |
+
+> **建议**：T32a–T32d 是"用户已实测到 bug"的功能，**优先级应高于 T62（行内图）与 T63/T69（增值项）**。若必须压缩工期，按 §10.3 顺序先裁增值项，不要裁脚注识别。
+
+### 14.9 本节新增风险
+
+| # | 风险 | 等级 | 控制措施 |
+|---|---|---|---|
+| C13 | **误判把 TOC 页变成满屏脚注热区** | 中 | N1 排除规则 + T32d 用真实 TOC 页做 fixture 单测 |
+| C14 | **跨文档 id 重复导致配对错乱** | 中 | `AnchorKey = (docId, id)`，绝不用裸 id 做 key |
+| C15 | **注释在 `notes.xhtml` 且不在 spine → 用户读不到注释全文** | 低 | 弹窗 `body` 自足已覆盖；正文里额外提示"完整注释见弹窗" |
+| C16 | **改通道 A 为 DOM 遍历时的回归** | 中 | T32c 保留旧正则路径的等价性测试（同一批标准 EPUB，新旧输出逐字符比对） |
+
+---
+
 *本文为只读设计分析。除本文件外未修改项目中任何文件，未执行任何 git 操作。*
