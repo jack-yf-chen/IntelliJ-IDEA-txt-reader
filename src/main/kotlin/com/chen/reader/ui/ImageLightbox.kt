@@ -3,6 +3,7 @@ package com.chen.reader.ui
 import com.chen.reader.book.BookResources
 import com.chen.reader.model.ImageHotSpot
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.ui.popup.JBPopup
 import com.intellij.openapi.ui.popup.JBPopupFactory
 import com.intellij.util.ui.JBUI
@@ -45,6 +46,9 @@ import javax.swing.event.AncestorListener
  * 这样首屏不卡 EDT，也不违反设计文档 §8「解码必须在后台」的纪律。
  */
 internal object ImageLightbox {
+    /** 灯箱诊断日志：搜 `图片灯箱解码完成` 即可定位"拿到的是不是原图档位" */
+    private val LOG = Logger.getInstance(ImageLightbox::class.java)
+
     /** 首屏预览宽：够看清内容，又不至于等太久 */
     private const val PREVIEW_WIDTH = 1200
 
@@ -127,6 +131,12 @@ internal object ImageLightbox {
         private var dragOriginY = 0
         private var popup: JBPopup? = null
 
+        /**
+         * 是否保持"适应面板"。为 true 时组件尺寸变化或新位图到达都会重新 fit；
+         * 用户一旦手动缩放或切到 1:1 就置 false，之后不再自动覆盖用户的视图。
+         */
+        private var autoFit = true
+
         @Volatile
         private var disposed = false
 
@@ -140,6 +150,18 @@ internal object ImageLightbox {
                 requestDecode(PREVIEW_WIDTH, replace = false)
             }
             installInteractions()
+            // 首屏就要 fit：否则 scale 停在默认 1.0、origin 停在 (0,0)，
+            // preview 非空时会先显示成"1:1 贴左上角"，要等高清回来才纠正。
+            // 此时组件可能还没有真实尺寸，fitToPanel() 内部会兜底用 preferredSize。
+            fitToPanel()
+            addComponentListener(object : java.awt.event.ComponentAdapter() {
+                override fun componentResized(event: java.awt.event.ComponentEvent) {
+                    if (autoFit) {
+                        fitToPanel()
+                        repaint()
+                    }
+                }
+            })
         }
 
         fun bindPopup(popup: JBPopup) {
@@ -172,13 +194,28 @@ internal object ImageLightbox {
                 if (!shouldApply) {
                     return@executeOnPooledThread
                 }
+                val bitmap = decoded ?: return@executeOnPooledThread
                 synchronized(lock) {
                     if (disposed) {
                         return@executeOnPooledThread
                     }
-                    image = decoded
+                    image = bitmap
                 }
-                application.invokeLater { fitToPanel(); repaint() }
+                application.invokeLater {
+                    // 用户已经手动缩放过就不要再覆盖他的视图。
+                    if (autoFit) {
+                        fitToPanel()
+                    }
+                    // 诊断日志：万一还糊，看一眼"位图实际宽高 vs 面板宽高 vs scale"就能定位
+                    // 到底是解码拿错了档位（拿到小图），还是只是缩放比例本身大。
+                    LOG.info(
+                        "图片灯箱解码完成：resourceId=${spot.resourceId} " +
+                            "位图=${bitmap.width}x${bitmap.height} " +
+                            "面板=${panelWidth()}x${panelHeight()} " +
+                            "scale=${(scale * 100).toInt()}% targetWidth=$targetWidth",
+                    )
+                    repaint()
+                }
             }
         }
 
@@ -211,6 +248,8 @@ internal object ImageLightbox {
                     if (nextScale == scale) {
                         return
                     }
+                    // 滚轮也是手动缩放，之后不再自动 fit。
+                    autoFit = false
                     // 以鼠标位置为锚点缩放，体验接近看图软件。
                     val anchorX = event.x
                     val anchorY = event.y
@@ -240,8 +279,8 @@ internal object ImageLightbox {
 
             zoomIn.addActionListener { zoomBy(ZOOM_IN_FACTOR) }
             zoomOut.addActionListener { zoomBy(1.0 / ZOOM_IN_FACTOR) }
-            actual.addActionListener { scale = 1.0; centerImage(); repaint() }
-            fit.addActionListener { fitToPanel(); repaint() }
+            actual.addActionListener { autoFit = false; scale = 1.0; centerImage(); repaint() }
+            fit.addActionListener { autoFit = true; fitToPanel(); repaint() }
             close.addActionListener { popup?.cancel() }
 
             val sizeLabel = JLabel(spot.resourceId)
@@ -262,6 +301,8 @@ internal object ImageLightbox {
             if (nextScale == scale) {
                 return
             }
+            // 手动缩放后不再自动 fit，否则高清图一到就把用户调好的比例冲掉。
+            autoFit = false
             val centerX = width / 2.0
             val centerY = height / 2.0
             val relativeX = (centerX - originX) / scale
@@ -272,24 +313,29 @@ internal object ImageLightbox {
             repaint()
         }
 
-        /** 缩放到适应面板并居中 */
+        /** 面板宽；组件还没布局时兜底用 preferredSize（首屏 fit 时宽度常常还是 0） */
+        private fun panelWidth(): Int = width.takeIf { it > 0 } ?: preferredSize.width
+
+        private fun panelHeight(): Int = height.takeIf { it > 0 } ?: preferredSize.height
+
+        /**
+         * 缩放到适应面板并居中。
+         *
+         * 宽高用**同一个** `scale`，所以一定是等比缩放，不会拉伸变形。
+         */
         private fun fitToPanel() {
             val current = synchronized(lock) { image } ?: return
-            val panelWidth = width.takeIf { it > 0 } ?: preferredSize.width
-            val panelHeight = height.takeIf { it > 0 } ?: preferredSize.height
             scale = minOf(
-                panelWidth.toDouble() / current.width.toDouble(),
-                panelHeight.toDouble() / current.height.toDouble(),
+                panelWidth().toDouble() / current.width.toDouble(),
+                panelHeight().toDouble() / current.height.toDouble(),
             ).coerceIn(MIN_SCALE, MAX_SCALE)
             centerImage()
         }
 
         private fun centerImage() {
             val current = synchronized(lock) { image } ?: return
-            val panelWidth = width.takeIf { it > 0 } ?: preferredSize.width
-            val panelHeight = height.takeIf { it > 0 } ?: preferredSize.height
-            originX = ((panelWidth - current.width * scale) / 2).toInt()
-            originY = ((panelHeight - current.height * scale) / 2).toInt()
+            originX = ((panelWidth() - current.width * scale) / 2).toInt()
+            originY = ((panelHeight() - current.height * scale) / 2).toInt()
         }
 
         override fun paintComponent(graphics: Graphics) {

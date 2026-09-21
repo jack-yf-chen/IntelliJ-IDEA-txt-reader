@@ -1,11 +1,13 @@
 package com.chen.reader.book
 
 import com.intellij.openapi.Disposable
+import com.intellij.openapi.diagnostic.Logger
 import java.awt.Graphics2D
 import java.awt.Image
 import java.awt.RenderingHints
 import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
+import java.lang.ref.SoftReference
 import java.nio.file.Path
 import java.util.LinkedHashMap
 import java.util.zip.ZipFile
@@ -15,6 +17,11 @@ internal const val SVG_MIME = "image/svg+xml"
 
 /** 位图缓存默认像素预算：约 64 MB（按 ARGB 每像素 4 字节折算约 16.7 M 像素） */
 private const val DEFAULT_PIXEL_BUDGET = 16_000_000L
+
+/** 原图（软引用）缓存的最大条目数；超了按访问顺序淘汰最久未用的 */
+private const val MAX_FULL_CACHE_ENTRIES = 8
+
+private val LOG = Logger.getInstance(EpubResources::class.java)
 
 /**
  * 资源元信息。
@@ -42,10 +49,16 @@ interface BookResources : Disposable {
     fun meta(resourceId: String): ResourceMeta?
 
     /**
-     * 取到位图。`targetWidth <= 0` 表示"按原始尺寸返回"。
+     * 取到位图。`targetWidth <= 0` 表示"按原始尺寸返回"（灯箱高清用）。
      *
-     * 返回结果是**解码后立即缩放**到 targetWidth 的小图，只缓存缩放后的版本；
      * 返回 null 表示不支持或失败，调用方应绘制占位框。
+     *
+     * **两级缓存，必须分开存**（0.5.0「灯箱图片失真」的根因就是没分开）：
+     * - `targetWidth > 0`：按显示宽度缩放的**小图**，走像素预算 LRU（见 [cache]）；
+     * - `targetWidth <= 0`：**原图**，走软引用缓存（见 [fullCache]），不占常驻内存。
+     *
+     * 两者如果共用一份以 resourceId 为 key 的缓存，阅读区先用几百 px 解码并缓存，
+     * 灯箱再请求原图就会命中那张小图，放大显示必然模糊。
      *
      * **必须在后台线程调用**（评审 H2：`ImageIO` 解码不能落在 EDT）。
      */
@@ -101,9 +114,25 @@ class EpubResources(
 ) : BookResources {
     private val lock = Any()
 
-    /** 解码结果缓存，按访问顺序淘汰。同一张图只按"首次请求时的目标宽度"缓存一份。 */
+    /**
+     * **小图缓存**：按显示宽度缩放后的位图，按访问顺序淘汰、受像素预算约束。
+     *
+     * key 仍是 `resourceId` 一个维度，因为阅读区对同一张图的请求宽度基本固定；
+     * 命中时若位图比本次请求宽度还窄，会重新解码替换（见 [rasterizeScaled]），
+     * 否则窗口拉宽后正文里会一直显示被放大的糊图。
+     */
     private val cache = LinkedHashMap<String, BufferedImage>(16, 0.75f, true)
 
+    /**
+     * **原图缓存**：`targetWidth <= 0` 的解码结果，用 [SoftReference] 持有。
+     *
+     * 原图动辄几百万像素，放进像素预算 LRU 会瞬间把小图全挤掉，
+     * 所以用软引用单独一层：内存够就留着复用，不够时交给 GC 回收，不占常驻。
+     * 这层**不参与** [cachedPixels] 记账——记账只管受预算约束的小图那一层。
+     */
+    private val fullCache = LinkedHashMap<String, SoftReference<BufferedImage>>(8, 0.75f, true)
+
+    /** 只统计**小图缓存**占用的像素数；原图走软引用，不进预算。 */
     private var cachedPixels = 0L
 
     override fun meta(resourceId: String): ResourceMeta? {
@@ -123,18 +152,60 @@ class EpubResources(
             // 矢量与其它不支持的格式，留给后续 T60/T61 与降级策略处理（本批只做占位框）。
             return null
         }
+        return if (targetWidth <= 0) {
+            rasterizeFull(entry)
+        } else {
+            rasterizeScaled(entry, targetWidth)
+        }
+    }
 
-        synchronized(lock) { cache[resourceId] }?.let { return it }
+    /** 小图档位：按显示宽度缩放，走像素预算 LRU。 */
+    private fun rasterizeScaled(entry: EpubResourceEntry, targetWidth: Int): BufferedImage? {
+        val resourceId = entry.resourceId
+        // 请求宽度不需要超过原图宽度，否则缓存命中判断会永远不成立、每次都重解。
+        val effectiveWidth = entry.width.takeIf { it > 0 }?.let { minOf(targetWidth, it) } ?: targetWidth
 
-        val bytes = readZipEntry(entry.zipPath) ?: return null
-        val decoded = runCatching { ImageIO.read(ByteArrayInputStream(bytes)) }.getOrNull() ?: return null
-        val scaled = if (targetWidth > 0 && decoded.width > targetWidth) {
+        synchronized(lock) { cache[resourceId] }
+            // 缓存的图比这次要的宽度还窄 → 放大显示会糊，必须重新解码替换。
+            ?.takeIf { it.width >= effectiveWidth }
+            ?.let { return it }
+
+        val decoded = decodeEntry(entry) ?: return null
+        val scaled = if (decoded.width > targetWidth) {
             scaleToWidth(decoded, targetWidth)
         } else {
             decoded
         }
         publish(resourceId, scaled)
         return scaled
+    }
+
+    /** 原图档位：不缩放，走软引用缓存。 */
+    private fun rasterizeFull(entry: EpubResourceEntry): BufferedImage? {
+        val resourceId = entry.resourceId
+
+        synchronized(lock) { fullCache[resourceId]?.get() }?.let { return it }
+
+        // 小图缓存里如果已经是原图尺寸，直接复用，省一次解码。
+        synchronized(lock) { cache[resourceId] }
+            ?.takeIf { entry.width <= 0 || it.width >= entry.width }
+            ?.let { return it }
+
+        val decoded = decodeEntry(entry) ?: return null
+        synchronized(lock) {
+            fullCache[resourceId] = SoftReference(decoded)
+            trimFullCacheLocked()
+        }
+        LOG.info(
+            "EPUB 原图解码：resourceId=$resourceId 位图=${decoded.width}x${decoded.height} " +
+                "内建=${entry.width}x${entry.height} mime=${entry.mime}",
+        )
+        return decoded
+    }
+
+    private fun decodeEntry(entry: EpubResourceEntry): BufferedImage? {
+        val bytes = readZipEntry(entry.zipPath) ?: return null
+        return runCatching { ImageIO.read(ByteArrayInputStream(bytes)) }.getOrNull()
     }
 
     override fun bytes(resourceId: String): ByteArray? {
@@ -151,6 +222,7 @@ class EpubResources(
     override fun dispose() {
         synchronized(lock) {
             cache.clear()
+            fullCache.clear()
             cachedPixels = 0L
         }
     }
@@ -168,6 +240,24 @@ class EpubResources(
                 cache.remove(eldest.key)
                 cachedPixels -= pixelsOf(eldest.value)
             }
+        }
+    }
+
+    /**
+     * 清理原图软引用缓存：先丢掉已被 GC 回收的条目，再按访问顺序淘汰到条目上限。
+     *
+     * 只做引用表清理，**不做像素记账**（原图不占像素预算）。
+     */
+    private fun trimFullCacheLocked() {
+        val iterator = fullCache.entries.iterator()
+        while (iterator.hasNext()) {
+            if (iterator.next().value.get() == null) {
+                iterator.remove()
+            }
+        }
+        while (fullCache.size > MAX_FULL_CACHE_ENTRIES) {
+            val eldest = fullCache.entries.firstOrNull() ?: break
+            fullCache.remove(eldest.key)
         }
     }
 
