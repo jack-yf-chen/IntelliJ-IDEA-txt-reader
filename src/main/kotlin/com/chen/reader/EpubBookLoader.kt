@@ -20,8 +20,12 @@ import org.w3c.dom.Node
 import org.xml.sax.EntityResolver
 import org.xml.sax.InputSource
 import java.io.ByteArrayInputStream
+import java.io.StringReader
 import java.net.URLDecoder
+import java.nio.ByteBuffer
+import java.nio.charset.CharacterCodingException
 import java.nio.charset.Charset
+import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
 import java.util.zip.ZipFile
@@ -42,6 +46,40 @@ import javax.xml.parsers.DocumentBuilderFactory
  */
 object EpubBookLoader {
     private val utf8 = StandardCharsets.UTF_8
+
+    /** GB18030 是 GBK / GB2312 的超集，用它兜 GB 系声明可避免生僻字丢码 */
+    private val gb18030Charset = Charset.forName("GB18030")
+    private val big5Charset = Charset.forName("Big5")
+    private val windows1252Charset = Charset.forName("windows-1252")
+
+    /**
+     * Windows-1252 的全部非 ASCII 可打印字符。
+     *
+     * 用它们的集合圈定"疑似被二次转码"的片段：一段文本要被怀疑，必须**整段**都由这些字符组成，
+     * 中间不能夹任何正常的汉字或 ASCII 字母——真实的多语言混排正文天然不满足，直接被排除。
+     */
+    private val mojibakeRunRegex = Regex(
+        """[\u0080-\u00FF\u0100-\u017F\u0192\u02C6\u02DC\u2013\u2014\u2018-\u201E""" +
+            """\u2020-\u2022\u2026\u2030\u2039\u203A\u20AC\u2122]+""",
+    )
+
+    /** 中日韩字符：用作"还原成功"的判据（正常西文的重音词变不出汉字） */
+    private val cjkRegex = Regex("""[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\u3040-\u30FF]""")
+
+    /**
+     * cp1252 中**不属于 Latin-1** 的那 27 个字符 → 字节。
+     *
+     * 反向映射表的另一半：U+0080–U+00FF 按恒等 low byte 处理，见 [reverseMojibakeBytes]。
+     */
+    private val CP1252_REVERSE: Map<Char, Int> = mapOf(
+        '\u20AC' to 0x80, '\u201A' to 0x82, '\u0192' to 0x83, '\u201E' to 0x84,
+        '\u2026' to 0x85, '\u2020' to 0x86, '\u2021' to 0x87, '\u02C6' to 0x88,
+        '\u2030' to 0x89, '\u0160' to 0x8A, '\u2039' to 0x8B, '\u0152' to 0x8C,
+        '\u017D' to 0x8E, '\u2018' to 0x91, '\u2019' to 0x92, '\u201C' to 0x93,
+        '\u201D' to 0x94, '\u2022' to 0x95, '\u2013' to 0x96, '\u2014' to 0x97,
+        '\u02DC' to 0x98, '\u2122' to 0x99, '\u0161' to 0x9A, '\u203A' to 0x9B,
+        '\u0153' to 0x9C, '\u017E' to 0x9E, '\u0178' to 0x9F,
+    )
     private val blockTagRegex = Regex("""(?i)</?(p|div|section|article|header|footer|table|nav|body|html|ul|ol|dl|dt|dd)\b[^>]*>""")
     private val lineBreakRegex = Regex("""(?i)<br\b[^>]*>""")
     private val tagRegex = Regex("""<[^>]+>""")
@@ -889,10 +927,17 @@ object EpubBookLoader {
      *
      * XXE 防护与 [parseXml] 同源：关闭外部 DTD / SCHEMA、禁用实体展开，
      * 并用空 [EntityResolver] 兜底，外部实体即便被声明也取不到内容。
+     *
+     * **0.7.0：改走字符流 [InputSource] 而不是字节流。**
+     * [markup] 到这里已经是**解码正确的 Unicode 字符串**了，但里面往往还留着一句陈旧的
+     * `<?xml version="1.0" encoding="gb2312"?>`。老实现把它 `toByteArray(utf8)`
+     * 喂给 DOM，解析器就会照着那句声明**二次解码**——刚修好的正又被打回 mojibake，
+     * 而且这一路绕过 [detectCharset]，改编码探测根本救不了。
+     * 走 `StringReader` 直接给字符，声明里的 encoding 就完全不起作用了。
      */
     private fun parseXhtml(markup: String): Document {
         return newSecureDocumentBuilder(allowDoctype = true)
-            .parse(ByteArrayInputStream(markup.toByteArray(utf8)))
+            .parse(InputSource(StringReader(markup)))
     }
 
     private fun newSecureDocumentBuilder(allowDoctype: Boolean): DocumentBuilder {
@@ -914,9 +959,114 @@ object EpubBookLoader {
 
     private fun decodeMarkup(bytes: ByteArray): String {
         val charset = detectCharset(bytes)
-        return bytes.toString(charset).removePrefix("\uFEFF")
+        return repairMojibake(bytes.toString(charset).removePrefix("\uFEFF"))
     }
 
+    /**
+     * 修复**已经混进文件本身**的 mojibake（“乱码字修回来”）。
+     *
+     * ## 为什么改完 [detectCharset] 还不够
+     *
+     * 有些书的 XHTML 是被上游**二次转码**过的：原始 UTF-8 字节先被当成某个单字节字符集读了一遍，
+     * 得到的那串乱码字符**又被按 UTF-8 存进了文件**。此时：
+     *
+     * - 文件的字节**确实是合法 UTF-8**，无任何歧义——`detectCharset` 判 UTF-8 是对的；
+     * - 按 UTF-8 解出来的结果也**确实等于文件里的字符**——错的不是解码，是**内容**。
+     *
+     * b1 这本书就是典型：`OEBPS/text00000.html` 完全没有 encoding 声明，
+     * `<title>` 的原始字节是 `C3 A4 C2 BD C5 93 …`，即字符「ä½œ」本身被 UTF-8 编码；
+     * 其中 `C5 93`（œ）是 Windows-1252 的 0x9C，**ISO-8859-1 里没有这个字符**，
+     * 由此反推当初的误读字符集是 Windows-1252：`ä½œ` → `[E4 BD 9C]` → UTF-8 解出来就是「作」。
+     *
+     * ## 三个门槛，缺一不动
+     *
+     * 这类"猜测式还原"最怕把好书改坏，所以一段文本必须**同时**满足：
+     *
+     * 1. 整段只由「cp1252 的高位字符」组成（U+0080–U+00FF、U+0100–U+017F，外加 € ™ 等
+     *    它特有的那几个符号）——中间不能夹任何汉字或 ASCII 字母，真实的多语言混排天然被排除；
+     * 2. 按 [reverseMojibakeBytes] 反向映射回字节后，能被 UTF-8 **严格**解码；
+     * 3. 还原结果里出现了中日韩字符——这是最能排除误伤的判据：
+     *    正常的法语 / 西语重音词（café、Noël）即使碰巧满足前两条，也变不出汉字。
+     *
+     * 任何一步失败就原样返回。宁可不修，也不能把好书改坏。
+     */
+    private fun repairMojibake(text: String): String {
+        val builder = StringBuilder(text.length)
+        var cursor = 0
+        var repairedAny = false
+        mojibakeRunRegex.findAll(text).forEach { run ->
+            val repaired = unMangle(run.value) ?: return@forEach
+            builder.append(text, cursor, run.range.first).append(repaired)
+            cursor = run.range.last + 1
+            repairedAny = true
+        }
+        if (!repairedAny) {
+            return text
+        }
+        builder.append(text, cursor, text.length)
+        return builder.toString()
+    }
+
+    /** 把一段"疑似被二次转码"的字符还原成原字符；还原不了返回 null。 */
+    private fun unMangle(run: String): String? {
+        if (run.length < 2) {
+            return null
+        }
+        val bytes = reverseMojibakeBytes(run) ?: return null
+        if (!decodesStrictly(bytes, utf8)) {
+            return null
+        }
+        val repaired = String(bytes, utf8)
+        if (repaired.isEmpty() || repaired == run || repaired.contains('\uFFFD')) {
+            return null
+        }
+        return repaired.takeIf { cjkRegex.containsMatchIn(it) }
+    }
+
+    /**
+     * 把一串"乱码字符"按当年的**反向映射**还原成原始字节。
+     *
+     * 这里必须自己写映射表，而不能用 `Charset.forName("windows-1252").newEncoder()`：
+     * Java 的 cp1252 **严格实现会把 0x81 / 0x8D / 0x8F / 0x90 / 0x9D 这五个未定义槽位判为不可映射**，
+     * 一遇到就抛异常；而现实中的转码工具通常把它们**按 Latin-1 恒等映射成 U+0081…U+009D**。
+     *
+     * b1 正好就踩在这个槽上：「意」的 UTF-8 是 `E6 84 8F`，末字节 0x8F 被映射成了 U+008F——
+     * 用严格编码器的话，整段 24 个汉字会因为这一个字节全部还原失败。
+     *
+     * 规则：U+0000–U+00FF 恒等取低字节；表里列出的 cp1252 特有符号取其对应字节；其余一律返回 null（放弃）。
+     */
+    private fun reverseMojibakeBytes(run: String): ByteArray? {
+        val bytes = ByteArray(run.length)
+        run.forEachIndexed { index, char ->
+            val code = char.code
+            bytes[index] = when {
+                code <= 0xFF -> code
+                else -> CP1252_REVERSE[char] ?: return null
+            }.toByte()
+        }
+        return bytes
+    }
+
+    /**
+     * 判定 XHTML 文档的真实编码。
+     *
+     * ## 0.7.0：为什么不能再盲信 XML 声明
+     *
+     * 老实现是「有 BOM 用 BOM，否则 `Charset.forName(XML 声明的 encoding)`」。
+     * 转换器生成 / 二次打包的 EPUB 里**声明与实际字节不一致**很常见（b1 这本书就是
+     * 声明 GB 系、实际 UTF-8），一旦信了声明，整篇 markup 变成 mojibake，
+     * `extractTitle` 取到的章节标题就是一串 `ä½œä¸ºæ„ å¿—…`。
+     *
+     * 判定顺序（强信号优先）：
+     *
+     * 1. **BOM** —— 字节级硬证据，优先级最高；
+     * 2. **UTF-8 严格解码是否通过** —— 多字节序列**恰好全部合法**是极强的信号
+     *    （GB18030 几乎能把任意字节流"解出"东西来，所以"声明的 GB 能解通"是弱信号）。
+     *    纯 ASCII 也走这一支，结果与 UTF-8 等价，无害；
+     * 3. **声明的编码**（走白名单映射，不吃任意字符串）——仅当它也能严格解码时采纳；
+     * 4. **GB18030 → Big5** 依次试，第一个严格解码成功的返回；
+     * 5. 都不行才回落到 `utf8`，与老实现兜底行为一致。
+     */
     private fun detectCharset(bytes: ByteArray): Charset {
         if (bytes.size >= 3 && bytes[0] == 0xEF.toByte() && bytes[1] == 0xBB.toByte() && bytes[2] == 0xBF.toByte()) {
             return utf8
@@ -928,11 +1078,68 @@ object EpubBookLoader {
             return StandardCharsets.UTF_16LE
         }
 
+        if (decodesStrictly(bytes, utf8)) {
+            return utf8
+        }
+
         val header = bytes.copyOfRange(0, bytes.size.coerceAtMost(512)).toString(StandardCharsets.ISO_8859_1)
-        val encoding = encodingRegex.find(header)?.groupValues?.getOrNull(1)
-        return encoding
-            ?.let { runCatching { Charset.forName(it) }.getOrNull() }
-            ?: utf8
+        val declared = encodingRegex.find(header)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.trim()
+            ?.let(::declaredCharset)
+        if (declared != null && decodesStrictly(bytes, declared)) {
+            return declared
+        }
+
+        listOf(gb18030Charset, big5Charset).forEach { candidate ->
+            if (decodesStrictly(bytes, candidate)) {
+                return candidate
+            }
+        }
+        return utf8
+    }
+
+    /**
+     * XML 声明里的编码名 → [Charset]。
+     *
+     * **必须是白名单，不能用 `Charset.forName` 直接吃任意字符串**：
+     * 一来 EPUB 里的声明写法五花八门（`x-gbk`、`latin-1`、`cp1252`…），
+     * 二来把不可信输入的编解码器选择权交出去没必要——认不出的一律返回 null，
+     * 交给后面的回退链处理，不会比今天更差。
+     *
+     * GB 三兄弟统一映射到 **GB18030**（超集），避免 GBK 缺生僻字时丢码。
+     */
+    private fun declaredCharset(encoding: String): Charset? {
+        val normalized = encoding.lowercase()
+        return when {
+            normalized in setOf("utf-8", "utf8") -> utf8
+            normalized in setOf("utf-16", "utf-16le", "utf-16be") -> StandardCharsets.UTF_16
+            normalized in setOf("gb2312", "gbk", "gb18030", "x-gbk", "x-gb2312") -> gb18030Charset
+            normalized in setOf("big5", "big-5") -> big5Charset
+            normalized in setOf("iso-8859-1", "latin1", "latin-1") -> StandardCharsets.ISO_8859_1
+            normalized in setOf("windows-1252", "cp1252") -> windows1252Charset
+            else -> null
+        }
+    }
+
+    /**
+     * [bytes] 能否被 [charset] **严格**解码。
+     *
+     * 严格 = `CodingErrorAction.REPORT`：畸形输入 / 不可映射字符一律抛
+     * `CharacterCodingException`，而不是像 `String(bytes, charset)` 那样静默替换成 U+FFFD
+     * （静默替换会让"GB18030 能解通"这种弱信号永远为真，探测就失去意义）。
+     */
+    private fun decodesStrictly(bytes: ByteArray, charset: Charset): Boolean {
+        return try {
+            charset.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(ByteBuffer.wrap(bytes))
+            true
+        } catch (_: CharacterCodingException) {
+            false
+        }
     }
 
     private fun extractTitle(markup: String): String? {
