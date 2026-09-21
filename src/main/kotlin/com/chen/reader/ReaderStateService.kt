@@ -44,4 +44,8 @@ class ReaderState {
     var widthMode: String = "舒适"
     var hideCursor: Boolean = false
     var buttonStyle: String = "文字"
+    /** Neat Reader 手动缩放档位（zoomLevel）；null 表示从未手动缩放过。 */
+    var neatReaderZoomLevel: Double? = null
+    /** Neat Reader 缩放是否被手动锁定；锁定后不再随工具窗口宽度自动换档。 */
+    var neatReaderZoomLocked: Boolean = false
 }

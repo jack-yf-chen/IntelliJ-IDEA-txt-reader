@@ -595,6 +595,20 @@ private val resizeDebounceTimer = Timer(RESIZE_DEBOUNCE_MS, ...)  // javax.swing
 
 **问题 2 工作量**：N1–N4 约 1–2 天（含 1–2 轮断点调参）；N5 约 0.5 天；N6 约 0.2 天。合计 **1.5–2.5 天**。
 
+> **0.4.7 实现说明（对上面 N1 档位表的偏离）**
+>
+> 用户已拍板 **Q4 = 保"不错版"**。结合 §2.3 第 3 条：`cssWidth = W / zoomFactor`，
+> `zoomFactor < 1`（缩小渲染）会让站点以为窗口**更宽**，与"避开宽屏断点"的目标方向相反，
+> 所以上表按 `minCssWidth` 一路缩小渲染的取法不再适用。
+>
+> 0.4.7 改为两段式约束：**`cssWidth` 必须落在 `[TARGET_CSS_WIDTH_MIN, TARGET_CSS_WIDTH_MAX] = [600, 1024]` 内**
+> ——窗口比下界窄才缩小渲染（补足站点 CSS 像素），比上界宽则**放大**渲染（把 CSS 像素压回上界内）。
+> 档位粒度与迟滞沿用本文参数：`ZOOM_LEVEL_STEP = 0.4`（约 7.6%，肉眼可辨）、`HYSTERESIS_CSS_PX = 40`，
+> 只是判据落在 cssWidth 轴上而非窗口宽度轴上。
+>
+> 五个常量集中在 `NeatReaderPanel.kt` 的 `companion object` 里，属于纯参数：
+> 按 `README.md`「Neat Reader 缩放调参」一节的日志步骤真机实测后回填数值即可，**不需要改任何逻辑**。
+
 ---
 
 ## 3. 涉及文件清单（问题 2）

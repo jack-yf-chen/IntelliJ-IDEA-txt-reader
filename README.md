@@ -2,7 +2,7 @@
 
 Novel Reader 是一个用于 IntelliJ IDEA 的轻量级本地小说阅读插件，目标是在不离开 IDE 的情况下完成本地小说阅读、章节导航、阅读样式调整和划词查词。
 
-当前版本：`0.4.6`
+当前版本：`0.4.7`
 
 ## 目标环境
 
@@ -15,7 +15,9 @@ Novel Reader 是一个用于 IntelliJ IDEA 的轻量级本地小说阅读插件�
 - `Tools -> Novel Reader` 菜单入口。
 - 右侧 `Novel Reader` 工具窗口，包含“本地阅读”和“Neat Reader”两个 Tab。
 - 内嵌 Neat Reader Web 端，默认打开 `https://www.neat-reader.cn/webapp`，并提供官网和外部浏览器打开入口。
-- Neat Reader 内嵌页支持按工具窗口宽度进行温和自动缩放，自动模式会避开 Neat Reader 的宽屏版式断点，并拦截新窗口请求，避免云端下载或打开书籍时弹出空白窗口。
+- Neat Reader 内嵌页按离散档位自动缩放：插件先由窗口宽度反推「站点看到的 CSS 视口宽度」，再选档，并带迟滞带，临界附近不会反复抖动；目标优先保证"不错版"（不出现宽屏窄列版式）。
+- Neat Reader 手动缩放会被记住并锁定，点「跟随窗口」可解锁回到自动换档。
+- Neat Reader 新窗口拦截脚本只在页面加载完成后注入，并带校验与重试，降低空白弹窗概率。
 - TXT 文件读取，支持 UTF-8、GB18030、GBK 编码回退。
 - EPUB 文件读取，支持按 OPF spine 顺序提取 XHTML 正文并生成章节导航。
 - EPUB 脚注和基础复杂排版还原：脚注引用、章节末尾注释、标题、列表、引用、表格、图片 alt、ruby 注音和强调文本会转成更适合纯文本阅读的结构。
@@ -34,6 +36,41 @@ Novel Reader 是一个用于 IntelliJ IDEA 的轻量级本地小说阅读插件�
 - 选中文本后右键进行本地词典查找、汉典查词、百度搜索和复制。
 - 虚拟阅读组件按行保存字符位置，提升行尾选字和跨行拖选稳定性。
 - 阅读区右侧选字缓冲，方便选中行尾最后一个字。
+
+## Neat Reader 缩放调参
+
+内嵌网页的自动缩放以「站点看到的 CSS 视口宽度」为目标（CEF 语义：`cssWidth = 窗口像素宽 / zoomFactor`），目标区间写在
+`NeatReaderPanel.kt` 的 `TARGET_CSS_WIDTH_MIN` / `TARGET_CSS_WIDTH_MAX` 两个常量里。站点真实断点需要真机测量，测量方法：
+
+1. `Help -> Show Log in ...` 打开 IDE 日志，搜索 `Neat Reader 缩放`。
+2. 缓慢拖动工具窗口宽度，日志会逐档打印：
+
+   ```text
+   Neat Reader 缩放[resize 防抖] viewportWidth=1180 zoomLevel=0.80 zoomFactor=1.157 cssWidth=1020 档位=2 显示=115% 目标区间=[600,1024] 迟滞=40 locked=false
+   Neat Reader 页面回报: metrics innerWidth=1020 clientWidth=1020 bodyWidth=1020
+   ```
+
+3. 找到**第一次出现「双列 / 窄正文 + 侧边栏」版式**的那一行，把它当时的 `cssWidth`（或 `innerWidth`）记下来，
+   把 `TARGET_CSS_WIDTH_MAX` 改成比它小 40~80 的值。
+4. 反之，若窄窗口下正文被挤压或出现横向滚动，把那一刻的 `cssWidth` 记下来，把 `TARGET_CSS_WIDTH_MIN` 改成比它大 40~80 的值。
+5. 档位切换太迟钝或太敏感时调 `HYSTERESIS_CSS_PX`；相邻档肉眼看不出区别时把 `ZOOM_LEVEL_STEP` 调大。
+
+改完重新编译即可，不需要动其它逻辑。手动「缩小 / 放大」会被持久化并锁定自动换档，点「跟随窗口」解锁。
+
+### 排查：宽窗口下「保不错版」失效
+
+缩放档位受 `MIN_ZOOM_LEVEL` / `MAX_ZOOM_LEVEL`（默认 `-3.0 ~ 3.0`，对应倍率 `0.578 ~ 1.728`）限制。
+如果窗口太宽，需要的放大倍率超过上限，`cssWidth` 就压不回 `TARGET_CSS_WIDTH_MAX`，宽屏版式仍会出现。
+这时日志里会有明确的 WARN：
+
+```text
+Neat Reader 缩放已达上限，cssWidth 压不回目标区间：viewportWidth=2000 zoomLevel=3.00 zoomFactor=1.728 cssWidth=1157 目标区间=[600,1024] ...
+```
+
+**排查顺序**：先搜日志里有没有 `缩放已达上限` / `缩放已达下限`。
+
+- **有** → 根因是缩放上下限被夹住，**改 `TARGET_CSS_WIDTH_MAX` 是无效的**，应放宽 `MAX_ZOOM_LEVEL`（窄窗口则放宽 `MIN_ZOOM_LEVEL`）。
+- **没有** → 才是断点猜错了，按上面第 3 步调 `TARGET_CSS_WIDTH_MAX`。
 
 ## 划词查词
 
