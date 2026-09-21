@@ -618,6 +618,8 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         textPane.updateReaderStyle(
             font = Font(selectedFontFamily(), selectedFontWeight().style, stateService.state.fontSize),
             foreground = selectedForegroundColor(),
+            // 脚注强调色要按背景亮度反推，所以背景必须一起传进去（主题切换时立即生效）。
+            background = selectedBackgroundColor(),
             lineSpacingPercent = stateService.state.lineSpacingPercent,
             weightLevel = selectedFontWeight().paintLevel,
         )
@@ -625,10 +627,14 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     }
 
     private fun applyTheme() {
-        val theme = selectedTheme()
-        val background = theme.background ?: UIManager.getColor("TextArea.background")
+        val background = selectedBackgroundColor()
         textPane.background = background
         scrollPane.viewport.background = background
+    }
+
+    /** 主题背景色；「跟随 IDE」时回落到 Swing 的默认文本区背景。 */
+    private fun selectedBackgroundColor(): Color {
+        return selectedTheme().background ?: UIManager.getColor("TextArea.background")
     }
 
     private fun selectedForegroundColor(): Color {

@@ -99,7 +99,15 @@ data class FootnoteBodyBlock(
     val footnoteId: String,
     val number: Int,
     val text: String,
-) : Block
+) : Block {
+    /**
+     * 开头编号标记 "[注N]" 的长度。
+     *
+     * 渲染层要给这个前缀单独着色，**口径必须与 [plainContentOf] 完全一致**，
+     * 所以放在这里而不是在 UI 层另写一遍字符串拼接。
+     */
+    val markerLength: Int get() = "[注$number]".length
+}
 
 /** 该块在 `plainText` 中实际贡献的字符串。必须与 `Book.buildPlainText` 的拼接口径一致。 */
 internal fun plainContentOf(block: Block): String = when (block) {
