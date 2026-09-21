@@ -78,12 +78,18 @@ data class CaptionBlock(
     val text: String,
 ) : Block
 
-/** 正文中的脚注引用标记，形如 "[注1]"，可点击 → 弹窗 */
+/**
+ * 正文中的脚注引用标记，形如 "[注1]"，可点击 → 弹窗。
+ *
+ * `label` 保存书里原本的标记文本（如 "[1]"），用于弹窗标题与"书里编号 vs 插件编号"对不上时的排查；
+ * `number` 是插件实际显示的编号，两者可能不同（见 `EpubBookLoader` 的编号规则）。
+ */
 data class FootnoteRefBlock(
     override val plainStart: Int,
     override val plainEnd: Int,
     val footnoteId: String,
     val number: Int,
+    val label: String,
 ) : Block
 
 /** 章末注释条目。弹窗方案下**不是跳转目标**，仅用于差异化渲染 */

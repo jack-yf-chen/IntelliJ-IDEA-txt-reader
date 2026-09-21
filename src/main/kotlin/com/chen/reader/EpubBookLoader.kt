@@ -16,6 +16,9 @@ import com.chen.reader.model.TextBlock
 import com.chen.reader.model.imagePlaceholder
 import org.w3c.dom.Document
 import org.w3c.dom.Element
+import org.w3c.dom.Node
+import org.xml.sax.EntityResolver
+import org.xml.sax.InputSource
 import java.io.ByteArrayInputStream
 import java.net.URLDecoder
 import java.nio.charset.Charset
@@ -23,6 +26,7 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Path
 import java.util.zip.ZipFile
 import javax.xml.XMLConstants
+import javax.xml.parsers.DocumentBuilder
 import javax.xml.parsers.DocumentBuilderFactory
 
 /**
@@ -46,9 +50,6 @@ object EpubBookLoader {
     private val titleRegex = Regex("""(?is)<title\b[^>]*>(.*?)</title>""")
     private val headingRegex = Regex("""(?is)<h[1-3]\b[^>]*>(.*?)</h[1-3]>""")
     private val anyHeadingRegex = Regex("""(?is)<h([1-6])\b[^>]*>(.*?)</h\1>""")
-    private val footnoteElementRegex = Regex(
-        """(?is)<(aside|section|div|li|p)\b([^>]*(?:epub:type\s*=\s*["'][^"']*(?:footnote|endnote|note)[^"']*["']|class\s*=\s*["'][^"']*(?:footnote|endnote|annotation|fn)[^"']*["']|id\s*=\s*["'][^"']*(?:footnote|endnote|annotation|fn)[^"']*["'])[^>]*)>(.*?)</\1>""",
-    )
     private val anchorRegex = Regex("""(?is)<a\b([^>]*)>(.*?)</a>""")
     private val imageRegex = Regex("""(?is)<img\b([^>]*)/?>""")
     private val tableRowRegex = Regex("""(?is)<tr\b[^>]*>(.*?)</tr>""")
@@ -65,8 +66,70 @@ object EpubBookLoader {
     /** 注释条目可能落在这几种块元素里，用于定位"整块删除"的范围 */
     private val footnoteContainerRegex = Regex("""(?is)<(p|div|li|dd|blockquote)\b[^>]*>(.*?)</\1>""")
 
-    /** 脚注引用锚文本，形如 "[1]" / "1" / "〔1〕" */
-    private val footnoteMarkerRegex = Regex("""^\s*[\[〔【]?\s*(\d{1,4})\s*[\]〕】]?\s*$""")
+    /**
+     * 脚注引用锚文本，形如 "[1]" / "1" / "〔1〕" / "1." / "1、"。
+     *
+     * 末尾允许一个 `.,、．`，因为注释条目的编号常写成 "1. 六角括号内的话系译者所加。"
+     * ——老实现不放行，导致 `number` 取不到、退回位置序号，出现"书里 [3]、插件显示 [注1]"。
+     */
+    private val footnoteMarkerRegex = Regex("""^\s*[\[〔【(（]?\s*(\d{1,4})\s*[\]〕】)）]?\s*[.、．]?\s*$""")
+
+    /** 注释正文开头的编号标记（用于取"书里原本的编号"），要求后面还有正文，避免把纯数字段落当成标记 */
+    private val leadingMarkerRegex = Regex("""^\s*[\[〔【(（]?\s*\d{1,4}\s*[\]〕】)）]?\s*[.、．]?""")
+
+    /** N1：目录页文件名 */
+    private val TOC_NAME_REGEX = Regex("""(?i)(^|[_\-.])(toc|nav|contents|目录|目次)([_.\-]|$)""")
+
+    /** N1：正文里的目录标记（`<nav>` 元素或 `epub:type="toc"`） */
+    private val TOC_MARKER_REGEX = Regex(
+        """(?is)<nav\b[^>]*>|<[a-zA-Z][\w:-]*\b[^>]*\bepub:type\s*=\s*["'][^"']*\b(toc|toc-brief|landmarks)\b[^"']*["'][^>]*>""",
+    )
+
+    /** 通道 A：`epub:type` 取值里的脚注语义 */
+    private val FOOTNOTE_TYPE_REGEX = Regex("""(?i)\b(footnote|endnote|rearnote|note)\b""")
+
+    /** 通道 A：`class` / `id` 里的脚注语义（比 [FOOTNOTE_TYPE_REGEX] 宽一点，命中命名习惯） */
+    private val FOOTNOTE_NAME_REGEX = Regex("""(?i)(footnote|endnote|rearnote|annotation|\bfn\b|foot-?note)""")
+
+    /** N3：注释条目自己的"返回正文"回链，不是脚注引用 */
+    private val BACK_LINK_REGEX = Regex("""(?i)(返回|回正文|回原文|回原处|back|return|↩|↥|↑|\^)""")
+
+    /** N5：`<a>` 里包着图片 —— 图注链接，不是脚注 */
+    private val IMAGE_TAG_REGEX = Regex("""(?is)<\s*(img|svg|picture|figure|object|embed)\b""")
+
+    /** N4：href 带 URI scheme（http: / mailto: / …）即外链 */
+    private val URI_SCHEME_REGEX = Regex("""^[a-zA-Z][a-zA-Z0-9+.\-]{1,20}:""")
+
+    /** 只有这些元素的裸 `type` 属性才可能是脚注语义；`ol`/`a`/`input` 等的 `type` 是别的意思 */
+    private val TYPE_ATTR_TAGS = setOf("aside", "section", "div", "p", "li", "span", "dd", "dt", "blockquote", "footer")
+
+    /**
+     * 通道 A 只认**块级**元素。
+     *
+     * 必须挡住 `<sup>` / `<a>` / `<span>` 这类行内元素：Pandoc / Markdown 系转换器会把
+     * **引用标记**写成 `<sup class="footnote-ref" id="fnref1"><a href="#fn1">1</a></sup>`，
+     * 它同样带 footnote 语义的 class，但它是"引用点"而不是"注释条目"。
+     * 放开行内元素会让这类书每章多出 N 条正文只有 "1" 的假注释，
+     * 还把正文里的引用标记整块删掉（引用点消失）。
+     */
+    private val FOOTNOTE_CONTAINER_TAGS = setOf("aside", "section", "div", "li", "p", "dd", "dt", "blockquote", "footer")
+
+    /** `epub:type` 的标准命名空间 */
+    private const val EPUB_TYPE_NAMESPACE = "http://www.idpf.org/2007/ops"
+
+    /** DOM 递归深度上限，防御畸形嵌套导致的栈溢出 */
+    private const val MAX_DOM_DEPTH = 64
+
+    /** N2：脚注标记一定是短标记，超过这个长度就是正文里的长文本交叉引用 */
+    private const val MAX_MARKER_LABEL_LENGTH = 12
+
+    /**
+     * 通道 B 的 `elementIndex` 起始值。
+     *
+     * 两通道的 `elementIndex` 必须落在**互不相交**的区间，否则 `(docId, elementIndex)`
+     * 去重键会把通道 A 的第 0 条和通道 B 的第 0 条当成同一个元素，白白丢掉一条注释。
+     */
+    private const val MUTUAL_ELEMENT_INDEX_BASE = 1_000_000
 
     /** 哨兵分隔符。用 \u0000 是因为它不会被引擎的任何一步（去标签、实体解码、空白归一）吃掉。 */
     private const val MARK = '\u0000'
@@ -106,11 +169,11 @@ object EpubBookLoader {
 
                 val title = extractTitle(markup) ?: "第 ${chapters.size + 1} 章"
                 val chapterBody = buildChapterBody(
+                    markup = markup,
                     body = body,
                     documentPath = entryPath,
                     resourceIdByPath = resourceIdByPath,
                     resourceEntries = resourceEntries,
-                    zip = zip,
                 )
                 if (chapterBody.text.isBlank()) {
                     return@forEach
@@ -175,18 +238,31 @@ object EpubBookLoader {
      * 6. 其余标签按老规则转纯文本。
      */
     private fun buildChapterBody(
+        markup: String,
         body: String,
         documentPath: String,
         resourceIdByPath: Map<String, String>,
         resourceEntries: Map<String, EpubResourceEntry>,
-        zip: ZipFile,
     ): ChapterBody {
-        val standardNotes = collectStandardFootnotes(body)
-        val bodyWithoutStandard = removeStandardFootnoteBlocks(body)
-        val mutualNotes = collectMutualAnchorFootnotes(bodyWithoutStandard)
+        val isToc = isTocDocument(documentPath, body)
+
+        // 通道 A：epub:type / class / id 标注（DOM 遍历，优先级最高）
+        val standardNotes = if (isToc) emptyList() else collectStandardFootnotes(markup, documentPath)
+        val standardRanges = standardNotes.mapNotNull { note -> findElementByIdTag(body, note.id) }
+
+        // 通道 B：成对互指的双向锚点（转换器生成、无任何标注）
+        val mutualNotes = if (isToc) {
+            emptyList()
+        } else {
+            collectMutualAnchorFootnotes(body, documentPath, standardRanges)
+        }
         val notes = mergeFootnotes(standardNotes, mutualNotes)
 
-        val withoutNoteBlocks = removeMutualFootnoteBlocks(bodyWithoutStandard, mutualNotes)
+        // 两通道的注释条目都要从正文里摘掉，避免正文里重复出现一遍注释。
+        val withoutNoteBlocks = removeRanges(
+            body,
+            standardRanges + mutualNotes.mapNotNull { it.bodyBlockRange },
+        )
         val withRefs = replaceFootnoteRefs(withoutNoteBlocks, notes)
 
         val images = mutableListOf<ImageSpec>()
@@ -197,25 +273,179 @@ object EpubBookLoader {
 
     // ------------------------------------------------------------------ 脚注识别
 
-    /** 既有路径：`epub:type="footnote"` / `class="footnote"` / `id="fn*"` 标注的块。 */
-    private fun collectStandardFootnotes(body: String): List<EpubFootnote> {
-        return footnoteElementRegex.findAll(body)
-            .mapIndexedNotNull { index, match ->
-                val id = attributeValue(match.groupValues[2], "id") ?: return@mapIndexedNotNull null
-                val text = stripStructuredMarkup(match.groupValues[3])
-                if (text.isBlank()) {
-                    null
-                } else {
-                    EpubFootnote(id = id, refFragment = id, number = index + 1, text = text)
-                }
+    /**
+     * 通道 A（既有路径，优先级最高）：`epub:type` / `class` / `id` 里带 footnote 语义的块元素。
+     *
+     * **改用 DOM 遍历而非正则**：老实现用 `<(p|div|li)\b...>(.*?)</\1>` 惰性匹配，
+     * 遇到**嵌套同名标签**（`<div class="footnote"><div>…</div>…</div>`）会在第一个 `</div>`
+     * 处提前截断，注释正文被砍掉一半。DOM 天然处理嵌套，且能直接读到 `epub:type` 属性。
+     *
+     * 与老实现一致，只认**带非空 id** 的元素——没有 id 就无法定位引用链接，也无法摘除。
+     */
+    private fun collectStandardFootnotes(markup: String, documentPath: String): List<EpubFootnote> {
+        val document = runCatching { parseXhtml(markup) }.getOrNull() ?: return emptyList()
+        val root = document.documentElement ?: return emptyList()
+
+        val hits = mutableListOf<FootnoteElementHit>()
+        walkFootnoteElements(root, hits, 0)
+        if (hits.isEmpty()) {
+            return emptyList()
+        }
+
+        val result = mutableListOf<EpubFootnote>()
+        var fallbackNumber = 0
+        hits.forEachIndexed { index, hit ->
+            val text = normalizePlainText(hit.text)
+            if (text.isBlank()) {
+                return@forEachIndexed
             }
-            .toList()
+            // 编号优先取"书里原本的标记"（① 元素自身锚点的 label ② 正文开头的 [N] / N.），
+            // 取不到才退回位置序号 —— 老实现一律用位置序号，会出现"书里 [3]、插件显示 [注1]"。
+            val label = hit.anchorLabel?.takeIf { it.isNotBlank() }
+                ?: leadingMarkerLabel(text)
+                ?: ""
+            val number = footnoteMarkerNumber(label) ?: ++fallbackNumber
+            result += EpubFootnote(
+                docId = documentPath,
+                elementIndex = index,
+                id = hit.id,
+                refFragment = hit.id,
+                number = number,
+                label = label,
+                text = text,
+            )
+        }
+        return result
     }
 
-    private fun removeStandardFootnoteBlocks(body: String): String {
-        return footnoteElementRegex.replace(body) { match ->
-            if (attributeValue(match.groupValues[2], "id").isNullOrBlank()) match.value else ""
+    /** 递归找带 footnote 语义的元素；命中后不再深入，避免同一条注释被拆成多条。 */
+    private fun walkFootnoteElements(node: Node, hits: MutableList<FootnoteElementHit>, depth: Int) {
+        if (depth > MAX_DOM_DEPTH) {
+            return
         }
+        if (node is Element) {
+            val tagName = node.tagName.orEmpty()
+            val epubType = node.getAttribute("epub:type")
+                .ifBlank { node.getAttributeNS(EPUB_TYPE_NAMESPACE, "type") }
+                .ifBlank {
+                    // 裸 type 只在少数块级元素上才可能是脚注语义；
+                    // <ol type="1"> / <a type="text/html"> 之类必须忽略，否则会炸出大量假脚注。
+                    if (tagName.lowercase() in TYPE_ATTR_TAGS) node.getAttribute("type") else ""
+                }
+            val className = node.getAttribute("class")
+            val id = node.getAttribute("id")
+            if (id.isNotBlank() && tagName.lowercase() in FOOTNOTE_CONTAINER_TAGS &&
+                isFootnoteMarked(epubType, className, id)
+            ) {
+                hits += FootnoteElementHit(
+                    id = id,
+                    tagName = tagName,
+                    text = node.textContent.orEmpty(),
+                    anchorLabel = firstAnchorLabel(node),
+                )
+                return
+            }
+        }
+        val children = node.childNodes ?: return
+        for (index in 0 until children.length) {
+            walkFootnoteElements(children.item(index), hits, depth + 1)
+        }
+    }
+
+    private fun isFootnoteMarked(epubType: String, className: String, id: String): Boolean {
+        return FOOTNOTE_TYPE_REGEX.containsMatchIn(epubType) ||
+            FOOTNOTE_NAME_REGEX.containsMatchIn(className) ||
+            FOOTNOTE_NAME_REGEX.containsMatchIn(id)
+    }
+
+    /** 注释条目自身那个 `<a id="...">` 的锚文本，通常就是 "[3]" 这类编号。 */
+    private fun firstAnchorLabel(element: Element): String? {
+        val anchors = element.getElementsByTagNameNS("*", "a")
+        for (index in 0 until anchors.length) {
+            val anchor = anchors.item(index) as? Element ?: continue
+            if (anchor.getAttribute("id") == element.getAttribute("id")) {
+                return normalizePlainText(anchor.textContent.orEmpty())
+            }
+        }
+        return null
+    }
+
+    /** 通道 A 的注释条目：按 id 找到开标签，再用**配对计数**算出包含嵌套的完整范围。 */
+    private fun findElementByIdTag(markup: String, elementId: String): IntRange? {
+        val pattern = Regex(
+            """<([a-zA-Z][\w:-]*)\b[^>]*\bid\s*=\s*["']${Regex.escape(elementId)}["'][^>]*>""",
+        )
+        val match = pattern.find(markup) ?: return null
+        return findElementRange(markup, match.range.first, match.groupValues[1])
+    }
+
+    /**
+     * 从 `start`（指向 `<`）开始，按同名标签配对计数算出元素完整范围（含闭合标签）。
+     *
+     * 这是修复"嵌套同名标签截断"的另一半：配对计数保证 `<div><div>…</div></div>`
+     * 拿到的是外层完整区间，而不是第一个 `</div>`。
+     */
+    private fun findElementRange(markup: String, start: Int, tagName: String): IntRange? {
+        val openPattern = Regex("""<${Regex.escape(tagName)}\b[^>]*>""", RegexOption.IGNORE_CASE)
+        val closePattern = Regex("""</${Regex.escape(tagName)}\s*>""", RegexOption.IGNORE_CASE)
+        var depth = 1
+        var cursor = start + 1
+        while (cursor < markup.length && depth > 0) {
+            val openStart = openPattern.find(markup, cursor)?.range?.first ?: Int.MAX_VALUE
+            val closeStart = closePattern.find(markup, cursor)?.range?.first ?: Int.MAX_VALUE
+            when {
+                openStart == Int.MAX_VALUE && closeStart == Int.MAX_VALUE -> return null
+
+                openStart < closeStart -> {
+                    depth++
+                    cursor = (markup.indexOf('>', openStart) + 1).coerceAtLeast(cursor + 1)
+                }
+
+                else -> {
+                    depth--
+                    cursor = (markup.indexOf('>', closeStart) + 1).coerceAtLeast(cursor + 1)
+                    if (depth == 0) {
+                        return start until cursor
+                    }
+                }
+            }
+        }
+        return null
+    }
+
+    /** 删除若干区间；先按起点合并重叠区间，再从后往前删，保证前面的下标始终有效。 */
+    private fun removeRanges(markup: String, ranges: List<IntRange>): String {
+        if (ranges.isEmpty()) {
+            return markup
+        }
+        val merged = mutableListOf<IntRange>()
+        ranges.sortedBy { it.first }.forEach { range ->
+            val last = merged.lastOrNull()
+            if (last != null && range.first <= last.last) {
+                merged[merged.lastIndex] = last.first..maxOf(last.last, range.last)
+            } else {
+                merged += range
+            }
+        }
+        var result = markup
+        merged.sortedByDescending { it.first }.forEach { range ->
+            if (range.first >= 0 && range.last < result.length) {
+                result = result.removeRange(range)
+            }
+        }
+        return result
+    }
+
+    private fun normalizePlainText(text: String): String {
+        return text
+            .let(::decodeEntities)
+            .replace('\u00A0', ' ')
+            .replace(Regex("""[ \t\x0B\f\r]+"""), " ")
+            .lines()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .joinToString("\n")
+            .trim()
     }
 
     /**
@@ -238,10 +468,30 @@ object EpubBookLoader {
      *
      * 在此基础上再要求两端锚文本都解析出同一个 `[N]` 编号，避免把普通的
      * "正文链接 + 返回链接"误判成脚注。文档顺序上先出现的那个是引用点，后出现的那个是注释条目。
+     *
+     * ## 排除规则（缺一条就会整本书被毁）
+     *
+     * - **N1 目录页整页跳过**：文件名含 `toc|nav|contents|目录`，或正文含 `<nav>` /
+     *   `epub:type="toc"`。目录页链接密度最高，不排除会产生成百上千条假脚注。
+     * - **N1' `<nav>` 内的锚点逐条排除**：某些书把目录内联在正文文档里。
+     * - **N2 长文本交叉引用**：脚注标记一定是短标记，锚文本超过 `MAX_MARKER_LABEL_LENGTH` 直接排除。
+     * - **N3 "返回正文"回链**：锚文本含 `返回 / 回正文 / back / ↩ / ↑ / ^` 的排除
+     *   （它属于注释条目本身，不是脚注引用）。
+     * - **N4 外链**：href 带 URI scheme（`http:` `mailto:` …）的排除。
+     * - **N5 图片链接**：`<a>` 里包着 `<img>` 的排除。
+     * - **N6 悬空链接**：href 没有 fragment，或 fragment 在本文档里找不到对应 id 的，排除。
+     * - **N7 自指**：`id == fragment` 的排除。
+     * - **N8 两通道去重**：落在通道 A 已消耗区间内的锚点直接跳过（元素级去重，见 [mergeFootnotes]）。
      */
-    private fun collectMutualAnchorFootnotes(body: String): List<EpubFootnote> {
+    private fun collectMutualAnchorFootnotes(
+        body: String,
+        documentPath: String,
+        consumedRanges: List<IntRange>,
+    ): List<EpubFootnote> {
         val anchors = anchorRegex.findAll(body)
             .mapNotNull { match -> parseAnchor(match) }
+            .filter { anchor -> !isInsideNav(body, anchor.range.first) }
+            .filter { anchor -> consumedRanges.none { range -> anchor.range.first in range } }
             .toList()
         if (anchors.isEmpty()) {
             return emptyList()
@@ -256,6 +506,7 @@ object EpubBookLoader {
             if (anchor.id in used) {
                 return@forEach
             }
+            // N6：对端 id 必须真实存在，否则是悬空链接
             val peer = anchorsById[anchor.fragment] ?: return@forEach
             if (peer.fragment != anchor.id || peer.id in used) {
                 return@forEach
@@ -276,9 +527,12 @@ object EpubBookLoader {
             used += anchor.id
             used += peer.id
             result += EpubFootnote(
+                docId = documentPath,
+                elementIndex = MUTUAL_ELEMENT_INDEX_BASE + result.size,
                 id = ref.id,
                 refFragment = noteAnchor.id,
                 number = number,
+                label = ref.label,
                 text = noteText,
                 bodyBlockRange = container.range,
             )
@@ -286,18 +540,20 @@ object EpubBookLoader {
         return result.sortedBy { it.number }
     }
 
-    /** 删除注释条目所在的整个块元素（从后往前删，保证前面的区间仍然有效）。 */
-    private fun removeMutualFootnoteBlocks(body: String, notes: List<EpubFootnote>): String {
-        var result = body
-        notes
-            .mapNotNull { it.bodyBlockRange }
-            .sortedByDescending { it.first }
-            .forEach { range ->
-                if (range.first >= 0 && range.last < result.length) {
-                    result = result.removeRange(range)
-                }
-            }
-        return result
+    /** N1：目录页整页跳过。 */
+    private fun isTocDocument(documentPath: String, body: String): Boolean {
+        val fileName = documentPath.substringAfterLast('/', "").lowercase()
+        return TOC_NAME_REGEX.containsMatchIn(fileName) || TOC_MARKER_REGEX.containsMatchIn(body)
+    }
+
+    /** N1'：锚点是否落在 `<nav>` 元素内部。 */
+    private fun isInsideNav(body: String, position: Int): Boolean {
+        val open = body.lastIndexOf("<nav", position, ignoreCase = true)
+        if (open < 0) {
+            return false
+        }
+        val close = body.lastIndexOf("</nav", position, ignoreCase = true)
+        return close < open
     }
 
     /** 锚文本 → 脚注编号；不是 "[1]" 这类标记时返回 null。 */
@@ -307,6 +563,22 @@ object EpubBookLoader {
             ?.groupValues
             ?.getOrNull(1)
             ?.toIntOrNull()
+    }
+
+    /**
+     * 取注释正文开头的编号标记（"1. 六角括号…" → "1."，"[3] 译者注" → "[3]"）。
+     *
+     * 只认**开头**且后面还有正文的情况；整段就是一个数字的（比如分节号 "1"）不算标记。
+     * 这样"书里原本的编号"能传给 [FootnoteRefBlock.label]，弹窗里可以和插件编号并列显示。
+     */
+    private fun leadingMarkerLabel(text: String): String? {
+        val firstLine = text.lineSequence().firstOrNull { it.isNotBlank() }?.trim() ?: return null
+        val match = leadingMarkerRegex.find(firstLine) ?: return null
+        val label = match.value.trim()
+        if (label.isEmpty() || label.length >= firstLine.length) {
+            return null
+        }
+        return label
     }
 
     /** 找到包住指定 anchor id 的块级元素，用于整块摘除注释条目。 */
@@ -339,25 +611,43 @@ object EpubBookLoader {
         }
     }
 
-    /** 既有路径优先；编号撞车时顺延，避免两个脚注都叫 "[注1]"。 */
+    /**
+     * 两通道合并：通道 A（标注）优先级最高，通道 B 只补 A 没认出来的。
+     *
+     * 元素级去重按 `(docId, elementIndex)`：同一本书里如果两条通道命中了同一个元素，
+     * 后到的那条直接丢弃（通道 B 还会额外跳过落在 A 已消耗区间内的锚点）。
+     *
+     * 编号撞车时顺延到"当前最大编号 + 1"，避免两条注释都叫 "[注1]"
+     * （通道 A 的编号取自书里标记，同一章里出现两个 "[1]" 是可能的）。
+     */
     private fun mergeFootnotes(
         standard: List<EpubFootnote>,
         mutual: List<EpubFootnote>,
     ): List<EpubFootnote> {
-        val used = mutableSetOf<Int>()
+        val usedNumbers = mutableSetOf<Int>()
+        val seenElements = mutableSetOf<Pair<String, Int>>()
         val result = mutableListOf<EpubFootnote>()
-        standard.forEach { note ->
-            used += note.number
-            result += note
-        }
-        var next = (result.maxOfOrNull { it.number } ?: 0) + 1
-        mutual.forEach { note ->
-            if (used.add(note.number)) {
-                result += note
-            } else {
-                result += note.copy(number = next++)
+        var next = 1
+
+        fun add(note: EpubFootnote) {
+            if (!seenElements.add(note.docId to note.elementIndex)) {
+                return
             }
+            val number = if (usedNumbers.add(note.number)) {
+                note.number
+            } else {
+                var candidate = next
+                while (!usedNumbers.add(candidate)) {
+                    candidate++
+                }
+                candidate
+            }
+            next = maxOf(next, number + 1)
+            result += if (number == note.number) note else note.copy(number = number)
         }
+
+        standard.forEach(::add)
+        mutual.forEach(::add)
         return result.sortedBy { it.number }
     }
 
@@ -486,7 +776,7 @@ object EpubBookLoader {
                     }
 
                     MARK_REF -> notesById[value]?.let { note ->
-                        pieces += BodyPiece.FootnoteRef(note.id, note.number)
+                        pieces += BodyPiece.FootnoteRef(note.id, note.number, note.label)
                     }
                 }
             }
@@ -583,15 +873,38 @@ object EpubBookLoader {
 
     private fun parseXml(bytes: ByteArray, errorMessage: String): Document {
         try {
-            val factory = DocumentBuilderFactory.newInstance()
-            factory.isNamespaceAware = true
-            factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true)
-            factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
-            factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "")
-            factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "")
-            return factory.newDocumentBuilder().parse(ByteArrayInputStream(bytes))
+            return newSecureDocumentBuilder(allowDoctype = false)
+                .parse(ByteArrayInputStream(bytes))
         } catch (_: Throwable) {
             error(errorMessage)
+        }
+    }
+
+    /**
+     * 解析 XHTML 正文（带 DOCTYPE，所以不能禁用 doctype-decl）。
+     *
+     * XXE 防护与 [parseXml] 同源：关闭外部 DTD / SCHEMA、禁用实体展开，
+     * 并用空 [EntityResolver] 兜底，外部实体即便被声明也取不到内容。
+     */
+    private fun parseXhtml(markup: String): Document {
+        return newSecureDocumentBuilder(allowDoctype = true)
+            .parse(ByteArrayInputStream(markup.toByteArray(utf8)))
+    }
+
+    private fun newSecureDocumentBuilder(allowDoctype: Boolean): DocumentBuilder {
+        val factory = DocumentBuilderFactory.newInstance()
+        factory.isNamespaceAware = true
+        factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true)
+        if (!allowDoctype) {
+            factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
+        }
+        factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "")
+        factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "")
+        // 注意：这两个是"只有 setter、没有 getter"的 Java 方法，Kotlin 不会为它们合成属性，
+        // 必须显式调用 setter（写成 `isExpandEntityReferences = false` 会编译不过）。
+        factory.setExpandEntityReferences(false)
+        return factory.newDocumentBuilder().apply {
+            setEntityResolver(EntityResolver { _, _ -> InputSource(ByteArrayInputStream(ByteArray(0))) })
         }
     }
 
@@ -758,15 +1071,37 @@ object EpubBookLoader {
         val isVector: Boolean,
     )
 
+    /**
+     * 一条注释。
+     *
+     * @property docId 所属文档（zip 路径）；与 [elementIndex] 一起构成去重键。
+     * @property elementIndex 文档内元素序号。通道 A 取 `[0, n)`，通道 B 取
+     *   `[MUTUAL_ELEMENT_INDEX_BASE, …)`，两区间互不相交，避免去重键误撞。
+     * @property id 注释 id：引用点锚点的 id（正文里 `[注N]` 指向它）。
+     * @property refFragment 指向注释条目的 href fragment。
+     * @property number 插件显示的编号（可能和书里原本的编号不同）。
+     * @property label 书里原本的标记文本，形如 "[3]"，用于弹窗标题与对不上时排查。
+     * @property text 注释正文纯文本。
+     * @property bodyBlockRange 注释条目所在块元素在 body 中的范围（仅通道 B 有，用于整块删除）。
+     */
     private data class EpubFootnote(
-        /** 注释 id：引用点锚点的 id */
+        val docId: String,
+        val elementIndex: Int,
         val id: String,
-        /** 指向注释条目的 href fragment */
         val refFragment: String,
         val number: Int,
+        val label: String,
         val text: String,
-        /** 注释条目所在块元素在原 markup 中的范围（仅双向锚点路径有，用于整块删除） */
         val bodyBlockRange: IntRange? = null,
+    )
+
+    /** 通道 A 的 DOM 命中结果：一个带 footnote 语义、且带 id 的元素。 */
+    private data class FootnoteElementHit(
+        val id: String,
+        val tagName: String,
+        val text: String,
+        /** 元素自身那个 `<a id="...">` 的锚文本（"[3]" 之类），可能没有 */
+        val anchorLabel: String?,
     )
 
     private data class EpubAnchor(
@@ -776,24 +1111,42 @@ object EpubBookLoader {
         val range: IntRange,
     )
 
-    /** 解析一个 `<a>`：必须有 id 与带 fragment 的 href，否则不可能是成对锚点。 */
+    /**
+     * 解析一个 `<a>` 并应用 N2–N7 排除规则；返回 null 表示它不可能是脚注锚点。
+     *
+     * 排除：N4 外链（带 URI scheme）、N6 无 fragment、N7 自指、N5 图片链接、
+     * N2 长文本交叉引用、N3 "返回正文"回链。
+     */
     private fun parseAnchor(match: MatchResult): EpubAnchor? {
         val attrs = match.groupValues[1]
         val id = attributeValue(attrs, "id") ?: return null
         val href = attributeValue(attrs, "href") ?: return null
+        if (hasUriScheme(href) || !href.contains('#')) {
+            return null
+        }
         val fragment = href.substringAfterLast('#', "")
         if (id.isBlank() || fragment.isBlank() || id == fragment) {
             return null
         }
-        return EpubAnchor(id, fragment, match.groupValues[2], match.range)
+        val inner = match.groupValues[2]
+        if (IMAGE_TAG_REGEX.containsMatchIn(inner)) {
+            return null
+        }
+        val label = stripInlineMarkup(inner)
+        if (label.length > MAX_MARKER_LABEL_LENGTH || BACK_LINK_REGEX.containsMatchIn(label)) {
+            return null
+        }
+        return EpubAnchor(id, fragment, label, match.range)
     }
+
+    private fun hasUriScheme(href: String): Boolean = URI_SCHEME_REGEX.containsMatchIn(href)
 
     private sealed interface BodyPiece {
         data class Text(val value: String) : BodyPiece
 
         data class Image(val spec: ImageSpec, val inline: Boolean) : BodyPiece
 
-        data class FootnoteRef(val footnoteId: String, val number: Int) : BodyPiece
+        data class FootnoteRef(val footnoteId: String, val number: Int, val label: String) : BodyPiece
     }
 
     /**
@@ -849,10 +1202,12 @@ object EpubBookLoader {
                     }
 
                     is BodyPiece.FootnoteRef -> {
+                        // 纯文本贡献仍是 "[注N]"（与 0.4.1 起的口径一致，位置不会漂移）；
+                        // piece.label 只是元数据，供弹窗显示书里原本的编号。
                         val label = "[注${piece.number}]"
                         val start = offset
                         offset += label.length
-                        blocks += FootnoteRefBlock(start, offset, piece.footnoteId, piece.number)
+                        blocks += FootnoteRefBlock(start, offset, piece.footnoteId, piece.number, piece.label)
                     }
                 }
             }

@@ -34,4 +34,6 @@ data class FootnoteHotSpot(
     val footnoteId: String,
     val number: Int,
     val body: String,
+    /** 书里原本的引用标记，如 "[1]" */
+    val label: String,
 ) : HotSpot

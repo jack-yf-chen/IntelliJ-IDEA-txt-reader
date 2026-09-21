@@ -99,6 +99,7 @@ private fun buildHotSpots(blocks: List<Block>): List<HotSpot> {
                 footnoteId = block.footnoteId,
                 number = block.number,
                 body = footnoteBodies[block.footnoteId]?.text.orEmpty(),
+                label = block.label,
             )
 
             else -> Unit
