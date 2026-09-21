@@ -508,8 +508,14 @@ object EpubBookLoader {
      * 之所以不用"s/d 前缀互指"这条规则，是因为前缀只是该转换器的命名习惯；
      * 双向互指才是这类脚注的通用结构特征，换成别的转换器也能认出来。
      *
-     * 在此基础上再要求两端锚文本都解析出同一个 `[N]` 编号，避免把普通的
-     * "正文链接 + 返回链接"误判成脚注。文档顺序上先出现的那个是引用点，后出现的那个是注释条目。
+     * 编号取自**引用点**（文档顺序上先出现的那个）；注释条目端**不再要求编号相同** ——
+     * 这类转换器给注释条目的编号常**按小节重新起算**（正文 `[2]`/`[3]`/`[4]`… 的注释条目却写
+     * `[1]`/`[2]`/`[1]`…），两端编号对不上是常态。老实现要求"两端编号必须相等"，于是整对脚注被丢。
+     *
+     * 为避免把普通的"正文链接 + 返回链接"误判成脚注，改用一个**结构性判据**：
+     * 注释条目的锚点必须是所在块的**领衔元素**（见 [isLeadingAnchorInBlock]）。
+     * 正文里的引用点长在句子中间（常包在 `<sup>` 里），几乎不会出现在块首。
+     * 文档顺序上先出现的那个是引用点，后出现的那个是注释条目。
      *
      * ## 排除规则（缺一条就会整本书被毁）
      *
@@ -553,14 +559,19 @@ object EpubBookLoader {
             if (peer.fragment != anchor.id || peer.id in used) {
                 return@forEach
             }
-            val number = footnoteMarkerNumber(anchor.label) ?: return@forEach
-            if (footnoteMarkerNumber(peer.label) != number) {
-                return@forEach
-            }
-
             // 文档顺序：先出现的是引用点，后出现的是注释条目
             val (ref, noteAnchor) = if (anchor.range.first < peer.range.first) anchor to peer else peer to anchor
+
+            // 编号取自**引用点**（正文 <sup> 内那个）。这类转换器给注释条目的编号常按小节重新起算，
+            // 两端编号对不上是常态，所以绝不能拿注释条目端的编号去卡。
+            val number = footnoteMarkerNumber(ref.label) ?: return@forEach
+
+            // 结构性判据（替代老实现"两端编号必须相等"）：注释条目锚点必须领衔其所在块，
+            // 形如 <p><a id="d…">[1]</a> 注释正文…</p>。正文里的引用点长在句子中间，通不过这一条。
             val container = findContainingBlock(body, noteAnchor.id) ?: return@forEach
+            if (!isLeadingAnchorInBlock(body, container, noteAnchor)) {
+                return@forEach
+            }
             val noteText = extractFootnoteBodyText(container, noteAnchor.id)
             if (noteText.isBlank()) {
                 return@forEach
@@ -628,6 +639,37 @@ object EpubBookLoader {
         val idPattern = Regex("""id\s*=\s*["']${Regex.escape(anchorId)}["']""")
         return footnoteContainerRegex.findAll(body)
             .firstOrNull { match -> idPattern.containsMatchIn(match.groupValues[2]) }
+    }
+
+    /**
+     * 注释条目锚点是否"领衔"其所在块 —— 即块内容里、锚点之前只有空白。
+     *
+     * 这是"成对脚注"（通道 B）的**结构性判据**，用来替代老实现"两端编号必须相等"：
+     * 章末注释条目长这样 —— 锚点是整块第一个内容：
+     *
+     * ```
+     * <p style="text-indent:2em;"><a id="d1e150" href="#sd1e150">[1]</a> 注释正文…</p>
+     * ```
+     *
+     * 而正文里的引用点长在句子中间（常包在 `<sup>` 里，块前缀是一大段正文），通不过这一条，
+     * 从而挡住普通"正文链接 + 返回链接"被误判成脚注。
+     *
+     * 之所以不能要求"两端编号相等"：这类转换器给注释条目的编号**按小节重新起算**，
+     * 正文引用点是 `[2]`、章末注释条目却写 `[1]`，两端对不上就会把整对脚注丢掉（b1 里 296 对丢了 218 对）。
+     *
+     * @param body 当前文档的 `<body>` 内层原文（坐标基准与 `anchor.range` 一致）
+     * @param container [findContainingBlock] 命中的块级元素
+     * @param anchor 注释条目端锚点
+     */
+    private fun isLeadingAnchorInBlock(body: String, container: MatchResult, anchor: EpubAnchor): Boolean {
+        val inner = container.groups[2] ?: return false
+        val innerStart = inner.range.first
+        val innerEnd = inner.range.last
+        val anchorStart = anchor.range.first
+        if (anchorStart < innerStart || anchorStart > innerEnd) {
+            return false
+        }
+        return body.substring(innerStart, anchorStart).isBlank()
     }
 
     /** 注释正文 = 该块元素去掉自身锚点之后的全部内容。 */
