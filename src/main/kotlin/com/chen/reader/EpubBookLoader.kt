@@ -59,6 +59,10 @@ object EpubBookLoader {
     private val rubyRegex = Regex("""(?is)<ruby\b[^>]*>(.*?)<rt\b[^>]*>(.*?)</rt>(.*?)</ruby>""")
     private val strongRegex = Regex("""(?is)<(strong|b)\b[^>]*>(.*?)</\1>""")
     private val emphasisRegex = Regex("""(?is)<(em|i)\b[^>]*>(.*?)</\1>""")
+    private val preformattedRegex = Regex("""(?is)<pre\b[^>]*>.*?</pre>""")
+
+    /** XHTML 源码的缩进换行：换行符 + 两侧水平空白（不含 `\r`/`\n`，避免吃掉空行结构） */
+    private val sourceNewlineRegex = Regex("""[^\S\r\n]*\r?\n[^\S\r\n]*""")
     private val encodingRegex = Regex("""(?i)encoding\s*=\s*["']([^"']+)["']""")
     private val htmlEntityRegex = Regex("""&(#x?[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]+);""")
     private val attributeRegex = Regex("""(?is)\b([:\w-]+)\s*=\s*["']([^"']*)["']""")
@@ -947,6 +951,7 @@ object EpubBookLoader {
      */
     private fun stripStructuredMarkup(markup: String): String {
         return markup
+            .let(::foldSourceNewlines) // 必须第一步：把源码缩进换行折叠掉，见 [foldSourceNewlines]
             .replace(scriptStyleRegex, " ")
             .replace(rubyRegex) { match ->
                 val text = stripInlineMarkup(match.groupValues[1] + match.groupValues[3])
@@ -985,6 +990,39 @@ object EpubBookLoader {
             .replace(blockTagRegex, "\n")
             .replace(tagRegex, " ")
             .let(::normalizeStructuredText)
+    }
+
+    /**
+     * 折叠 XHTML **源码**里的换行（连同两侧缩进空白）为单个空格。
+     *
+     * 为什么必须做、且必须做在 [stripStructuredMarkup] 的最开头：
+     * EPUB 的 XHTML 普遍是缩进排版的，段落里的**行内元素**（最典型的就是脚注引用 `<a>`）
+     * 前后各有一个源码换行。它们只是给人看源码用的，**不是语义换行**。
+     * 留着的话正文会被切成「…前文 / `[注3]` / 后文…」三块，渲染层只能把 `[注3]`
+     * 排成独占一行，段落还被拆出多余空行（0.5.0 用户截图里那个 bug）。
+     *
+     * 真正的语义换行由**后面**的步骤产生（`<br>` → [lineBreakRegex]、块级标签 → [blockTagRegex]），
+     * 所以这两步必须排在折叠之后，不能被折叠吃掉。
+     *
+     * `<pre>` 是例外：那里的换行是**内容**而非排版，原样保留。
+     */
+    private fun foldSourceNewlines(markup: String): String {
+        val protectedRanges = preformattedRegex.findAll(markup).map { it.range }.toList()
+        if (protectedRanges.isEmpty()) {
+            return sourceNewlineRegex.replace(markup, " ")
+        }
+        val builder = StringBuilder(markup.length)
+        var cursor = 0
+        sourceNewlineRegex.findAll(markup).forEach { match ->
+            // 命中 `<pre>` 内部的换行：跳过，不折叠。
+            if (protectedRanges.any { range -> match.range.first >= range.first && match.range.last <= range.last }) {
+                return@forEach
+            }
+            builder.append(markup, cursor, match.range.first).append(' ')
+            cursor = match.range.last + 1
+        }
+        builder.append(markup, cursor, markup.length)
+        return builder.toString()
     }
 
     private fun stripInlineMarkup(markup: String): String {

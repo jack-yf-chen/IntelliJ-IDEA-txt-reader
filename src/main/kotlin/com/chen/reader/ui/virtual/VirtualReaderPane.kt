@@ -2,14 +2,15 @@ package com.chen.reader.ui.virtual
 
 import com.chen.reader.model.Block
 import com.chen.reader.model.Book
+import com.chen.reader.model.CaptionBlock
 import com.chen.reader.model.FootnoteBodyBlock
 import com.chen.reader.model.FootnoteRefBlock
 import com.chen.reader.model.HotSpot
 import com.chen.reader.model.ImageBlock
 import com.chen.reader.model.ImageHotSpot
 import com.chen.reader.model.InlineImageBlock
+import com.chen.reader.model.TextBlock
 import com.chen.reader.model.imagePlaceholder
-import com.chen.reader.model.plainContentOf
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.util.ui.JBUI
 import java.awt.Color
@@ -307,18 +308,51 @@ internal class VirtualReaderPane : JComponent(), Scrollable {
     /**
      * 按 `Book.blocks` 排版，用 **y 游标累积**代替老的"行序号 × 行高"。
      *
-     * 每个块独立换行（块自带换行，见 `model.Block` 的注释），所以一个块一定从新行开始。
-     * 文本块仍然逐字符 `metrics.charWidth()` 折行——这与老实现一致，
-     * 保证 `plainText` 的字符偏移到屏幕位置的映射仍然精确。
+     * ## 文本块合并（0.6.0）
+     *
+     * 连续的**可内联块**（文本 / 图注 / 脚注引用 / 章末注释条目）先并成一段再折行。
+     * 原因：脚注引用 `[注N]` 是独立块（[FootnoteRefBlock]），若"一个块一律另起一行"，
+     * 它就永远被顶到单独一行——段落还被切成 `前文 / [注3] / 后文`，前后多出空行。
+     *
+     * 段落分隔**不会**因此丢失：分隔靠块内容里自带的 `"\n"`（见 `model.Block` 的约束 1），
+     * 合并只是去掉"块边界"这个**伪换行**。段内文本直接取 `plainText` 的连续子串，
+     * 所以字符偏移到屏幕位置的映射仍然精确。
+     *
+     * 文本块仍然逐字符 `metrics.charWidth()` 折行——与老实现一致。
      */
     private fun layoutBlocks(book: Book, metrics: FontMetrics): LayoutResult {
         val result = mutableListOf<LayoutElement>()
         val maxWidth = maxContentWidth()
         var cursor = 0
+        val run = mutableListOf<Block>()
+
+        fun flushRun() {
+            if (run.isEmpty()) {
+                return
+            }
+            // 块在 plainText 中连续、不重叠，所以"首块起点 → 末块终点"就是这一段的内容。
+            val text = book.plainText.substring(run.first().plainStart, run.last().plainEnd)
+            if (text.isNotEmpty()) {
+                cursor = appendTextLines(
+                    result = result,
+                    text = text,
+                    baseOffset = run.first().plainStart,
+                    metrics = metrics,
+                    maxWidth = maxWidth,
+                    cursor = cursor,
+                )
+            }
+            run.clear()
+        }
 
         book.blocks.forEach { block ->
             when (block) {
-                is ImageBlock -> {
+                is TextBlock, is CaptionBlock, is FootnoteRefBlock, is FootnoteBodyBlock -> run += block
+
+                is ImageBlock, is InlineImageBlock -> {
+                    // 图片必须独占区域，先收掉前面的文本段。
+                    // （行内图在首批仍按块级渲染，真正的图文混排是 T62。）
+                    flushRun()
                     val element = createImageElement(
                         block,
                         y = contentInsets.top + cursor,
@@ -326,35 +360,10 @@ internal class VirtualReaderPane : JComponent(), Scrollable {
                     )
                     result += element
                     cursor += element.height
-                }
-
-                is InlineImageBlock -> {
-                    // 行内图在首批按块级渲染（真正的图文混排是 T62）。
-                    val element = createImageElement(
-                        block,
-                        y = contentInsets.top + cursor,
-                        maxWidth = maxWidth,
-                    )
-                    result += element
-                    cursor += element.height
-                }
-
-                else -> {
-                    val text = plainContentOf(block)
-                    if (text.isEmpty()) {
-                        return@forEach
-                    }
-                    cursor = appendTextLines(
-                        result = result,
-                        text = text,
-                        baseOffset = block.plainStart,
-                        metrics = metrics,
-                        maxWidth = maxWidth,
-                        cursor = cursor,
-                    )
                 }
             }
         }
+        flushRun()
 
         if (result.isEmpty()) {
             // 老实现在空内容时也会产出一行，保持同样行为（避免 preferredSize 塌成 0）。
@@ -708,7 +717,11 @@ internal class VirtualReaderPane : JComponent(), Scrollable {
         }
         while (index < spots.size) {
             val spot = spots[index]
-            if (spot.plainStart > line.endOffset) {
+            // 用 `>=` 而不是 `>`：热区与本行的**字符交集为空**时（典型是图片占位符
+            // 紧邻的空行，行内没有任何属于该热区的字符）必须跳过，否则整条空行都会
+            // 变成"点一下就弹灯箱"的死区。字符交集非空 ⇒ 像素区间 [from, to) 也非空，
+            // 因为 xPositions 每一步至少 +1px。
+            if (spot.plainStart >= line.endOffset) {
                 break
             }
             if (spot.plainEnd > line.startOffset) {
