@@ -2,13 +2,16 @@ package com.chen.reader.ui.virtual
 
 import com.chen.reader.model.Block
 import com.chen.reader.model.Book
+import com.chen.reader.model.HotSpot
 import com.chen.reader.model.ImageBlock
+import com.chen.reader.model.ImageHotSpot
 import com.chen.reader.model.InlineImageBlock
 import com.chen.reader.model.imagePlaceholder
 import com.chen.reader.model.plainContentOf
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.util.ui.JBUI
 import java.awt.Color
+import java.awt.Cursor
 import java.awt.Dimension
 import java.awt.Font
 import java.awt.FontMetrics
@@ -71,6 +74,24 @@ internal class VirtualReaderPane : JComponent(), Scrollable {
     /** 正在后台解码的 resourceId，防止同一张图并发重复解码 */
     private val decoding = HashSet<String>()
 
+    /**
+     * 热区点击回调。交给 `ReaderPanel` 去弹层，本组件只负责命中判定。
+     *
+     * 命中热区时**不进入选区逻辑**——否则点注解会顺手把"[注1]"选中，右键菜单语义就乱了。
+     */
+    var onHotSpotClick: ((HotSpot) -> Unit)? = null
+
+    /**
+     * 基准光标（`ReaderPanel` 按"隐藏光标"开关设置）。
+     *
+     * 热区的手型光标**优先级高于**基准光标：开了"隐藏光标"也要能看见、能点到注解，
+     * 否则那个开关会直接废掉注解功能。
+     */
+    private var baseCursor: Cursor = Cursor.getPredefinedCursor(Cursor.TEXT_CURSOR)
+
+    /** 当前鼠标位置（用于 `setBaseCursor` 后立刻重算光标） */
+    private var lastMousePoint: Point? = null
+
     init {
         background = UIManager.getColor("TextArea.background")
         foreground = foregroundColor
@@ -115,6 +136,31 @@ internal class VirtualReaderPane : JComponent(), Scrollable {
 
     fun rebuildLayoutForCurrentSize() {
         rebuildLayout()
+    }
+
+    /** 设置基准光标（隐藏光标 / 默认文本光标）。热区手型光标始终优先于它。 */
+    fun setBaseCursor(cursor: Cursor) {
+        baseCursor = cursor
+        applyCursorFor(lastMousePoint)
+    }
+
+    /**
+     * 命中测试：返回 `point` 处的可点击热区，没有则返回 null。
+     *
+     * 文本行走**横向区间**判定（比"只看字符偏移"宽容一点，点 "[注1]" 的任意位置都算命中）；
+     * 图片块整块都是热区。
+     */
+    fun hotSpotAt(point: Point): HotSpot? {
+        val currentBook = book ?: return null
+        if (currentBook.hotSpots.isEmpty() || elements.isEmpty()) {
+            return null
+        }
+        return when (val element = elements[elementIndexForY(point.y)]) {
+            is TextLineElement -> hotSpotInLine(element, point)
+            is ImageElement -> currentBook.hotSpots.firstOrNull { spot ->
+                spot is ImageHotSpot && spot.plainStart == element.startOffset
+            }
+        }
     }
 
     fun offsetAtY(y: Int): Int {
@@ -509,6 +555,9 @@ internal class VirtualReaderPane : JComponent(), Scrollable {
         return synchronized(imageLock) { decodedImages[resourceId] }
     }
 
+    /** 已解码的位图（可能为 null）。灯箱首屏直接复用它，避免重复解码。 */
+    fun decodedImageFor(resourceId: String): BufferedImage? = decodedImage(resourceId)
+
     /**
      * 后台解码 + **只 repaint**（§8 红线）。
      *
@@ -563,28 +612,92 @@ internal class VirtualReaderPane : JComponent(), Scrollable {
     private fun installSelectionHandlers() {
         addMouseListener(object : MouseAdapter() {
             override fun mousePressed(event: MouseEvent) {
-                if (SwingUtilities.isLeftMouseButton(event)) {
-                    val offset = offsetAtPoint(event.point)
-                    selectionStart = offset
-                    selectionEnd = offset
-                    requestFocusInWindow()
-                    repaint()
+                if (!SwingUtilities.isLeftMouseButton(event)) {
+                    return
                 }
+                // 热区优先：命中就直接交给弹层，**不进入选区逻辑**。
+                val spot = hotSpotAt(event.point)
+                if (spot != null) {
+                    onHotSpotClick?.invoke(spot)
+                    return
+                }
+                val offset = offsetAtPoint(event.point)
+                selectionStart = offset
+                selectionEnd = offset
+                requestFocusInWindow()
+                repaint()
             }
 
             override fun mouseReleased(event: MouseEvent) {
-                if (SwingUtilities.isLeftMouseButton(event)) {
-                    selectionEnd = offsetAtPoint(event.point)
-                    repaint()
+                if (!SwingUtilities.isLeftMouseButton(event)) {
+                    return
                 }
+                if (hotSpotAt(event.point) != null) {
+                    return
+                }
+                selectionEnd = offsetAtPoint(event.point)
+                repaint()
+            }
+
+            override fun mouseExited(event: MouseEvent) {
+                lastMousePoint = null
+                applyCursorFor(null)
             }
         })
         addMouseMotionListener(object : MouseMotionAdapter() {
             override fun mouseDragged(event: MouseEvent) {
+                if (hotSpotAt(event.point) != null) {
+                    return
+                }
                 selectionEnd = offsetAtPoint(event.point)
                 repaint()
             }
+
+            override fun mouseMoved(event: MouseEvent) {
+                lastMousePoint = event.point
+                applyCursorFor(event.point)
+            }
         })
+    }
+
+    /** 热区 → 手型光标；否则回到基准光标（隐藏光标 / 文本光标）。 */
+    private fun applyCursorFor(point: Point?) {
+        cursor = if (point != null && hotSpotAt(point) != null) {
+            Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+        } else {
+            baseCursor
+        }
+    }
+
+    /** 在本行里找 `point` 命中的热区：热区按 `plainStart` 有序，二分定位后线性扫本行。 */
+    private fun hotSpotInLine(line: TextLineElement, point: Point): HotSpot? {
+        val spots = book?.hotSpots ?: return null
+        val x = point.x - contentInsets.left
+        var index = spots.binarySearch { spot ->
+            when {
+                line.startOffset < spot.plainStart -> 1
+                line.startOffset > spot.plainEnd -> -1
+                else -> 0
+            }
+        }
+        if (index < 0) {
+            index = -index - 1
+        }
+        while (index < spots.size) {
+            val spot = spots[index]
+            if (spot.plainStart > line.endOffset) {
+                break
+            }
+            if (spot.plainEnd > line.startOffset) {
+                val from = line.xForOffset(maxOf(spot.plainStart, line.startOffset))
+                val to = line.xForOffset(minOf(spot.plainEnd, line.endOffset))
+                if (x >= from && x <= to) {
+                    return spot
+                }
+            }
+            index++
+        }
+        return null
     }
 
     private fun clearSelection() {

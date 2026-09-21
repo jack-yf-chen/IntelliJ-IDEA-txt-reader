@@ -2,6 +2,11 @@ package com.chen.reader
 
 import com.chen.reader.model.Book
 import com.chen.reader.model.Chapter
+import com.chen.reader.model.FootnoteHotSpot
+import com.chen.reader.model.HotSpot
+import com.chen.reader.model.ImageHotSpot
+import com.chen.reader.ui.FootnotePopup
+import com.chen.reader.ui.ImageLightbox
 import com.chen.reader.ui.virtual.VirtualReaderPane
 import com.intellij.ide.BrowserUtil
 import com.intellij.openapi.application.ApplicationManager
@@ -62,6 +67,18 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     private var relayoutAnchorOffset: Int? = null
     private var pendingScrollRestore: PendingScrollRestore? = null
     private var pendingScrollRestoreAttempts = 0
+
+    /**
+     * 是否有弹层（注释弹窗 / 图片灯箱）正在显示。
+     *
+     * 弹层期间**忽略 viewport 的 componentResized**：弹层是独立窗口，理论上不会撑动 viewport，
+     * 但历史上 0.3.2「阅读记忆被覆盖」正是从这条 resize → 恢复 → 写回的回路漏出来的，
+     * 所以这里再加一道闸（T67 硬要求）。
+     */
+    private var overlayOpen = false
+
+    /** 弹层期间被跳过的 resize 次数；弹层关闭后补一次重排，避免漏掉真实的窗口缩放 */
+    private var resizeSkippedWhileOverlayOpen = false
     private val relayoutTimer = Timer(160) { restoreViewportAfterRelayout() }.apply {
         isRepeats = false
     }
@@ -82,6 +99,7 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         textPane.componentPopupMenu = createSelectionPopupMenu()
         updateReaderStyle()
         updateCursorMode()
+        installHotSpotHandlers()
         installKeyboardShortcuts()
 
         add(createToolbar(), BorderLayout.NORTH)
@@ -159,6 +177,11 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
         scrollPane.addMouseWheelListener(::handleWheelScroll)
         scrollPane.viewport.addComponentListener(object : ComponentAdapter() {
             override fun componentResized(event: ComponentEvent) {
+                // T67：弹层期间不重排，避免走 resize → 恢复 → 写回那条回路。
+                if (overlayOpen) {
+                    resizeSkippedWhileOverlayOpen = true
+                    return
+                }
                 scheduleRelayoutRestore()
                 updateReaderInsets(rebuildLayout = false)
             }
@@ -353,6 +376,10 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             val preferredCharset = if (shouldRestoreState) state.charsetName else null
             val book = BookLoader.load(path, preferredCharset)
             currentBook = book
+            // 兜底：万一某个弹层的关闭回调没触发（overlayOpen 卡住），换书时强制复位，
+            // 否则之后所有 viewport resize 都会被当成"弹层期间"而跳过重排。
+            overlayOpen = false
+            resizeSkippedWhileOverlayOpen = false
             textPane.setBook(book)
 
             state.filePath = path.toString()
@@ -658,7 +685,48 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
     }
 
     private fun updateCursorMode() {
-        textPane.cursor = if (stateService.state.hideCursor) hiddenCursor else defaultTextCursor
+        // 交给 VirtualReaderPane 当"基准光标"：热区的手型光标优先级高于它，
+        // 所以即使开了隐藏光标，注解/图片仍然看得见、点得到。
+        textPane.setBaseCursor(if (stateService.state.hideCursor) hiddenCursor else defaultTextCursor)
+    }
+
+    // ------------------------------------------------------------------ 热区弹层（T45 / T64 / T66 / T67）
+
+    private fun installHotSpotHandlers() {
+        textPane.onHotSpotClick = ::showHotSpotOverlay
+    }
+
+    private fun showHotSpotOverlay(spot: HotSpot) {
+        val book = currentBook ?: return
+        overlayOpen = true
+        when (spot) {
+            is FootnoteHotSpot -> FootnotePopup.show(textPane, spot, ::onOverlayClosed)
+
+            is ImageHotSpot -> ImageLightbox.show(
+                owner = textPane,
+                spot = spot,
+                resources = book.resources,
+                preview = textPane.decodedImageFor(spot.resourceId),
+                onClosed = ::onOverlayClosed,
+            )
+        }
+    }
+
+    /**
+     * 弹层关闭后：把焦点还给阅读区（T67）。
+     *
+     * 注意这里**只做焦点归还**，不调 `updateReaderInsets` / `rebuildLayout` 之类会重排的东西；
+     * 只有"弹层期间确实发生过真实 resize"才补一次重排，且仍然走正常的锚点保存流程。
+     */
+    private fun onOverlayClosed() {
+        overlayOpen = false
+        val skipped = resizeSkippedWhileOverlayOpen
+        resizeSkippedWhileOverlayOpen = false
+        focusReader()
+        if (skipped) {
+            updateReaderInsets(rebuildLayout = false)
+            scheduleRelayoutRestore()
+        }
     }
 
     private fun installKeyboardShortcuts() {
