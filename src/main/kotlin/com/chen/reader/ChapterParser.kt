@@ -23,7 +23,8 @@ import com.chen.reader.model.Chapter
  *
  * 1. 阿拉伯数字行会吃掉小数/日期（`1.5 倍`、`2024.10.01`）→ 分隔符后加负向断言 `(?![0-9０-９])`。
  * 2. 罗马数字行若允许空白分隔会吃掉英文句子（`I am a student`）→ 只允许 `、.．`，且**只认大写**（不用 `i` 标志）。
- * 3. 单独一行「开头」要有下限阈值：前导内容不足 [PREAMBLE_MIN_LENGTH] 时不补，避免多出一个几十字的垃圾章节。
+ * 3. 首条标题之前的前导内容要有下限阈值：不足 [PREAMBLE_MIN_LENGTH] 时**把首章起点钳到 0**
+ *    （前导并入首章）；够长才单独补一个「开头」章。两者必居其一，不留无处归属的空洞。
  *
  * 另加一条（设计文档里没有）：`第二卷第216页` 这类跨卷页码引用会被强规则吃掉，显式拒绝。
  */
@@ -104,8 +105,11 @@ object ChapterParser {
 
         val chapters = mutableListOf<Chapter>()
         val firstStart = matches.first().range.first
-        // 前导内容够长才补「开头」；太短就留在原位，免得凭空多出一个几十字的垃圾章节。
-        if (firstStart >= PREAMBLE_MIN_LENGTH) {
+        // 前导内容（首条标题之前的正文）不足 [PREAMBLE_MIN_LENGTH] 时，把首章起点**钳到 0**，
+        // 让这几十个字并入首章；够长才单独补一个「开头」章。
+        // 二选一，绝不留 [0, firstStart) 这段无处归属的空洞 —— 章节区间必须连续覆盖全文。
+        val clampFirstToZero = firstStart < PREAMBLE_MIN_LENGTH
+        if (!clampFirstToZero) {
             chapters += Chapter("开头", 0, firstStart)
         }
         matches.forEachIndexed { index, match ->
@@ -113,7 +117,7 @@ object ChapterParser {
             val title = cleanTitle(match.value).ifBlank { "第 ${index + 1} 章" }
             chapters += Chapter(
                 title = title,
-                startOffset = match.range.first,
+                startOffset = if (index == 0 && clampFirstToZero) 0 else match.range.first,
                 endOffset = nextStart,
             )
         }
@@ -216,6 +220,13 @@ object ChapterParser {
     /** `第N章` 之后允许的标题尾巴最大长度。 */
     private const val MAX_CHINESE_TITLE_SUFFIX_LENGTH = 40
 
-    /** 前导内容达到这个长度才补「开头」章节。 */
+    /**
+     * 前导内容（首条标题之前的正文）的长度分界。
+     *
+     * - `< 200`：把首章 `startOffset` 钳到 0，前导并入首章；
+     * - `>= 200`：补一个 `Chapter("开头", 0, firstStart)`。
+     *
+     * 目的是让章节区间**连续覆盖 `0..content.length`**，不留空洞。
+     */
     private const val PREAMBLE_MIN_LENGTH = 200
 }
