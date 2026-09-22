@@ -198,6 +198,12 @@
   - **已知偏差（已上报）**：b3 是 10 章而不是预估的 13-14。它的 NCX 实测是 **L1=10 / L2=4**（设计文档记的「L1=14」是扁平计数，实际有 4 条嵌在第二层），L2 的 4 条不满足下界 8，选中最深合格层 L1 后并上更浅层叶子仍是 10 条；把下界降到 4 会让 L2 合格，选中集合变成「L2 四条 + L1 六条叶子」，**仍是 10**。要拿到 14 必须把选中集合放宽成 `depth <= L*`，那会顺带把 b1 变成 82、b2 变成 105，与 78/94 冲突 —— 三本不能同时满足，这里按既定规则实现。
   - **另一处实现取舍（已上报）**：spec 里「TOC 模式不调 `extractTitle`」我理解为**章节标题**一律取自目录（确实不调），但**正文里文档标题仍照现状写入**。理由：不写的话 b1/b2/b3 的 `plainText` 会额外少掉十几处标题，超出「MD5 变化只因章节/注释落点」的口径。
 
+- 2026-09-24：**修复注释区容器不下钻导致 b2 的 68 个脚注一个都没识别（0.9.0 出包前修复，不动版本号）**。QA 独立复核 0.9.0 时查出：b2（李博杰《深入理解 AI Agent》）正文里有 68 个 `<a href="#fnN" class="footnote-ref" epub:type="noteref">`，注释端是 `<aside epub:type="footnote" role="doc-footnote" id="fnN">`（分布在 ch002/ch003/ch004/ch005/ch006/ch008/ch009/ch010/ch011/ch012 十篇），但插件产出 **0 个 `FootnoteRefBlock` / 0 个 `FootnoteHotSpot` / 10 个 `FootnoteBodyBlock`**，且那 10 个 body 每个是整章 `<section id="footnotes">` 的 textContent（3~14 条注释糊成一坨、编号全是 `[注1]`）。0.8.1 同样如此，属既有缺陷，但 0.9.0 把它带进了「注释按章归属」新链路，读者只能在章末看到一大坨【注释】，行内没有 `[注N]` 也点不了弹窗 —— 正是用户报的那类「注脚识别不到」。
+  - **根因**：`walkFootnoteElements` 命中一个候选后 `return` 不再下钻。b2 的外层 `<section id="footnotes" class="footnotes footnotes-end-of-document" epub:type="footnotes">` **先命中**（`section` 在 `FOOTNOTE_CONTAINER_TAGS`、id 非空、`class` 含 "footnote" 命中 `FOOTNOTE_NAME_REGEX`），于是里面 68 个 `<aside id="fnN">` 永远看不到；`refFragment` 变成 `"footnotes"`，正文里 `href="#fn1"` 匹配不上 `notesByFragment` → 引用点一个都不转成 `[注N]`。
+  - **修法**：命中后**先别急着收** —— 新增 `hasDeeperFootnoteEntry(element, selfId)`，若子树里还有「更深的、带**另一个** id 的」合格候选，说明当前元素只是**注释区容器**（分区），不是条目：不收它，继续下钻；只有子树里没有更深的条目时才收下并 `return`。判据与命中条件**完全一致**（`id` 非空且 `!= selfId`、`tagName` 在 `FOOTNOTE_CONTAINER_TAGS`、`isFootnoteMarked` 三条都判），带 `MAX_DOM_DEPTH` 深度上限防病态输入。
+  - **一个易漏点**：`<aside id="fn1">` 的 id **不**命中 `FOOTNOTE_NAME_REGEX`（`\bfn\b` 对 "fn1" 没有词边界），它是靠 `epub:type="footnote"` 命中的 —— `isFootnoteMarked` 三条少判一条就会整个漏掉。
+  - 实测（临时探针，验完已删）：**b2 `FootnoteRefBlock` 0 → 68、`FootnoteBodyBlock` 10 → 68、`FootnoteHotSpot` 0 → 68**，空弹窗 0，弹窗正文与 `<aside id="fnN">` 正文逐条一致（独立 oracle 68/68 全对，去掉空白后比对）；【注释】标题数 32 ≤ 94 章；区间仍连续覆盖 `0..len`；章末不再是「整章一大坨」。**b1 / b3 完全不受影响**：b1 仍 296/296/296、错配 0，`plainText` MD5 `3621ea2a31762c6924f0f06a74016026`(489124) 与修复前**逐字节一致**；b3 `cdfa445287f679051921569000a57011`(224006) 同样一致 —— 通道 A 没有波及其他书。b2 降级（nav 改名 + 去 `properties="nav"`）仍能退回 ncx、不崩（93 章，68/68）。b2 新 MD5 `77c3df0e1f940136bafc32cd5326fa3b`(444129)。`buildPlugin` 出包 `intellij-idea-novel-reader-0.9.0.zip` 通过。
+
 ## 后续验证步骤
 
 运行：

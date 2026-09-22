@@ -623,8 +623,12 @@ object EpubBookLoader {
                 }
             val className = node.getAttribute("class")
             val id = node.getAttribute("id")
+            // 命中后**先别急着收**：若子树里还有更深的、带另一个 id 的合格候选，
+            // 说明当前元素只是「注释区容器」（b2 的 <section id="footnotes"> 里套着
+            // 68 个 <aside id="fnN">），不是一条注释 —— 不收它，继续下钻。
             if (id.isNotBlank() && tagName.lowercase() in FOOTNOTE_CONTAINER_TAGS &&
-                isFootnoteMarked(epubType, className, id)
+                isFootnoteMarked(epubType, className, id) &&
+                !hasDeeperFootnoteEntry(node, id)
             ) {
                 hits += FootnoteElementHit(
                     id = id,
@@ -639,6 +643,49 @@ object EpubBookLoader {
         for (index in 0 until children.length) {
             walkFootnoteElements(children.item(index), hits, depth + 1)
         }
+    }
+
+    /**
+     * 子树里是否还有**更深的、带另一个 id** 的合格候选。
+     *
+     * 有 → 当前元素只是注释区容器（分区），不是一条注释，应当继续下钻到里面的条目；
+     * 没有 → 它才是一条注释。
+     *
+     * 判据与 [walkFootnoteElements] 的命中条件**完全一致**（`id` 非空且不等于自身、
+     * `tagName` 在 [FOOTNOTE_CONTAINER_TAGS]、`isFootnoteMarked` 三条都要判）。
+     * 特别是 `<aside id="fn1">`：**它的 id 并不命中** [FOOTNOTE_NAME_REGEX]（`\bfn\b`
+     * 对 "fn1" 没有词边界），它是靠 `epub:type="footnote"` 命中的，三条少判一条就会漏。
+     *
+     * @param selfId 当前元素自身的 id，用于排掉"后代里同名锚点"造成的自匹配
+     */
+    private fun hasDeeperFootnoteEntry(element: Element, selfId: String): Boolean {
+        return hasDeeperFootnoteEntry(element, selfId, 0)
+    }
+
+    private fun hasDeeperFootnoteEntry(element: Element, selfId: String, depth: Int): Boolean {
+        if (depth > MAX_DOM_DEPTH) {
+            return false
+        }
+        val children = element.childNodes ?: return false
+        for (index in 0 until children.length) {
+            val child = children.item(index) as? Element ?: continue
+            val tagName = child.tagName.orEmpty()
+            val id = child.getAttribute("id")
+            if (id.isNotBlank() && id != selfId && tagName.lowercase() in FOOTNOTE_CONTAINER_TAGS) {
+                val epubType = child.getAttribute("epub:type")
+                    .ifBlank { child.getAttributeNS(EPUB_TYPE_NAMESPACE, "type") }
+                    .ifBlank {
+                        if (tagName.lowercase() in TYPE_ATTR_TAGS) child.getAttribute("type") else ""
+                    }
+                if (isFootnoteMarked(epubType, child.getAttribute("class"), id)) {
+                    return true
+                }
+            }
+            if (hasDeeperFootnoteEntry(child, selfId, depth + 1)) {
+                return true
+            }
+        }
+        return false
     }
 
     private fun isFootnoteMarked(epubType: String, className: String, id: String): Boolean {
