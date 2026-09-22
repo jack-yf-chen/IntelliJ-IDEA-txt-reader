@@ -2,7 +2,10 @@ package com.chen.reader
 
 import com.chen.reader.book.EpubResourceEntry
 import com.chen.reader.book.EpubResources
+import com.chen.reader.book.EpubToc
 import com.chen.reader.book.SVG_MIME
+import com.chen.reader.book.EpubToc.TocEntry
+import com.chen.reader.book.normalizeZipPath
 import com.chen.reader.book.probeRasterSize
 import com.chen.reader.model.Block
 import com.chen.reader.model.Book
@@ -21,7 +24,6 @@ import org.xml.sax.EntityResolver
 import org.xml.sax.InputSource
 import java.io.ByteArrayInputStream
 import java.io.StringReader
-import java.net.URLDecoder
 import java.nio.ByteBuffer
 import java.nio.charset.CharacterCodingException
 import java.nio.charset.Charset
@@ -178,13 +180,25 @@ object EpubBookLoader {
     private const val MARK_IMAGE = "IMG"
     private const val MARK_REF = "FNREF"
 
+    /**
+     * 目录锚点哨兵。
+     *
+     * 与图片 / 脚注哨兵同构：写盘时插进 XHTML，`splitMarkedBody` 识别成
+     * [BodyPiece.TocAnchor]，`ChapterWriter` **只记录 offset、不写 Block**，
+     * 所以 `plainText` 一个字符都不会多。
+     */
+    private const val MARK_TOC = "TOC"
+
+    /** `\u0000TOC:123\u0000` —— 判断某段文本是否"只有哨兵"时用它剥离。 */
+    private val tocMarkerRegex = Regex("""\u0000${Regex.escape(MARK_TOC)}:\d+\u0000""")
+
     /** 只读文件头探测图片尺寸时最多读取的字节数 */
     private const val HEADER_BYTES = 64 * 1024
 
     fun load(path: Path): Book {
         val blocks = mutableListOf<Block>()
-        val chapters = mutableListOf<Chapter>()
         var resourceEntries = emptyMap<String, EpubResourceEntry>()
+        var chapters: List<Chapter> = emptyList()
 
         ZipFile(path.toFile(), utf8).use { zip ->
             val opfPath = findPackagePath(zip)
@@ -200,7 +214,18 @@ object EpubBookLoader {
             resourceEntries = buildResourceEntries(manifest.resources, zip)
             val resourceIdByPath = resourceEntries.values.associateBy({ it.zipPath }, { it.resourceId })
 
+            // 目录驱动切章：nav.xhtml 优先，退回 toc.ncx，都没有则走「一篇 spine 一章」兜底。
+            val tocEntries = readNavigation(opf, manifest, zip, opfDir)
+            val selectedToc = EpubToc.selectLevel(tocEntries)
+            val tocTitles = EpubToc.completeTitles(tocEntries)
+            val tocByDoc = selectedToc.groupBy { it.docPath }
+
             val writer = ChapterWriter(blocks)
+            /** 兜底 2 用：一篇 spine 一章的章节表 */
+            val spineChapters = mutableListOf<Chapter>()
+            /** 每个文档在 plainText 中的起始 offset，供无 fragment 的 TOC 条目落点 */
+            val docStartOffsets = linkedMapOf<String, Int>()
+
             spinePaths.forEach { entryPath ->
                 val entry = zip.getEntry(entryPath) ?: return@forEach
                 val markup = decodeMarkup(zip.getInputStream(entry).readBytes())
@@ -209,22 +234,28 @@ object EpubBookLoader {
                     return@forEach
                 }
 
-                val title = extractTitle(markup) ?: "第 ${chapters.size + 1} 章"
+                val docToc = tocByDoc[entryPath].orEmpty()
                 val chapterBody = buildChapterBody(
                     markup = markup,
                     body = body,
                     documentPath = entryPath,
                     resourceIdByPath = resourceIdByPath,
                     resourceEntries = resourceEntries,
+                    tocEntries = docToc,
                 )
                 if (chapterBody.text.isBlank()) {
                     return@forEach
                 }
 
+                writer.startDocument()
                 if (writer.offset > 0) {
                     writer.text("\n\n")
                 }
+                docStartOffsets[entryPath] = writer.offset
                 val start = writer.offset
+                // 文档标题照现状写进正文（保持 plainText 口径）；TOC 模式下它只作为正文，
+                // 章节标题一律取自目录（见 buildChaptersFromToc）。
+                val title = extractTitle(markup)?.takeIf { it.isNotBlank() } ?: "第 ${spineChapters.size + 1} 章"
                 val normalizedTitle = title.trim()
                 if (!chapterBody.text.startsWith(normalizedTitle)) {
                     writer.text("$normalizedTitle\n\n")
@@ -232,13 +263,28 @@ object EpubBookLoader {
                 writer.pieces(
                     splitMarkedBody(chapterBody.text, chapterBody.images, chapterBody.notes),
                 )
-                appendFootnoteSummary(writer, chapterBody.notes)
-                chapters += Chapter(title = normalizedTitle.take(80), startOffset = start, endOffset = writer.offset)
+                // 从没被任何引用点引用的注释，兜底写在本篇末尾（不丢内容）。
+                writer.appendOrphanNotes(chapterBody.notes)
+                spineChapters += Chapter(
+                    title = normalizedTitle.take(80),
+                    startOffset = start,
+                    endOffset = writer.offset,
+                )
             }
 
             if (writer.offset == 0) {
                 error("EPUB 未解析到可阅读正文。")
             }
+
+            chapters = buildChaptersFromToc(
+                selected = selectedToc,
+                titles = tocTitles,
+                tocOffsets = writer.tocOffsets,
+                docStartOffsets = docStartOffsets,
+                spinePaths = spinePaths,
+                totalLength = writer.offset,
+                fallback = spineChapters,
+            )
         }
 
         return Book(
@@ -254,24 +300,12 @@ object EpubBookLoader {
 
     // ------------------------------------------------------------------ 章节正文 → Block
 
-    /** 章末注释汇总区（与 0.4.1 起的纯文本口径保持一致）。 */
-    private fun appendFootnoteSummary(writer: ChapterWriter, notes: List<EpubFootnote>) {
-        if (notes.isEmpty()) {
-            return
-        }
-        writer.text("\n\n【注释】\n")
-        notes.forEachIndexed { index, note ->
-            if (index > 0) {
-                writer.text("\n")
-            }
-            writer.footnoteBody(note.key, note.number, note.text)
-        }
-    }
-
     /**
-     * 把一章的 XHTML 正文变成"带哨兵的纯文本 + 图片规格 + 脚注"。
+     * 把一篇文档的 XHTML 正文变成"带哨兵的纯文本 + 图片规格 + 脚注"。
      *
      * 处理顺序（顺序很关键）：
+     * 0. **插入目录锚点哨兵**（[insertTocMarkers]）—— 必须最前，之后所有步骤都在
+     *    同一份已插哨兵的字符串上算区间，天然一致，不需要任何偏移平移补偿；
      * 1. 既有路径（epub:type / class / id 标注）先摘出注释条目；
      * 2. 在剩下的正文里跑**双向锚点**识别，补上转换器生成的成对脚注；
      * 3. 删除注释条目所在的整块，避免正文里重复出现一遍注释；
@@ -285,24 +319,26 @@ object EpubBookLoader {
         documentPath: String,
         resourceIdByPath: Map<String, String>,
         resourceEntries: Map<String, EpubResourceEntry>,
+        tocEntries: List<TocEntry>,
     ): ChapterBody {
         val isToc = isTocDocument(documentPath, body)
+        val working = insertTocMarkers(body, tocEntries)
 
         // 通道 A：epub:type / class / id 标注（DOM 遍历，优先级最高）
         val standardNotes = if (isToc) emptyList() else collectStandardFootnotes(markup, documentPath)
-        val standardRanges = standardNotes.mapNotNull { note -> findElementByIdTag(body, note.id) }
+        val standardRanges = standardNotes.mapNotNull { note -> findElementByIdTag(working, note.id) }
 
         // 通道 B：成对互指的双向锚点（转换器生成、无任何标注）
         val mutualNotes = if (isToc) {
             emptyList()
         } else {
-            collectMutualAnchorFootnotes(body, documentPath, standardRanges)
+            collectMutualAnchorFootnotes(working, documentPath, standardRanges)
         }
         val notes = mergeFootnotes(standardNotes, mutualNotes)
 
         // 两通道的注释条目都要从正文里摘掉，避免正文里重复出现一遍注释。
         val withoutNoteBlocks = removeRanges(
-            body,
+            working,
             standardRanges + mutualNotes.mapNotNull { it.bodyBlockRange },
         )
         val withRefs = replaceFootnoteRefs(withoutNoteBlocks, notes)
@@ -312,6 +348,217 @@ object EpubBookLoader {
 
         return ChapterBody(text = stripStructuredMarkup(withImages), images = images, notes = notes)
     }
+
+    // ------------------------------------------------------------------ 目录（TOC）
+
+    /**
+     * 读出整本书的目录：优先 `nav.xhtml`，退回 `toc.ncx`，都没有返回 emptyList。
+     *
+     * **只解析 DOM，不碰安全配置**：`parseXml` / `parseXhtml` 里已经关掉外部实体与 DTD。
+     * 目录的实际解析交给纯函数 [EpubToc]。
+     *
+     * `nav.xhtml` / `toc.ncx` 在 `readManifest` 里落进了 `resources` 分支
+     * （`isReadableDocument` 对 `application/x-dtbncx+xml` 返回 false，nav 是 xhtml 但通常
+     * 不在 spine 里），所以这里**重扫一遍 OPF 的 item 列表**，不改动既有资源映射。
+     */
+    private fun readNavigation(
+        opf: Document,
+        manifest: Manifest,
+        zip: ZipFile,
+        opfDir: String,
+    ): List<TocEntry> {
+        val navItem = findManifestItemByProperty(opf, opfDir, "nav")
+            ?: findManifestItemByPath(opf, opfDir, NAV_FILE_NAMES)
+        if (navItem != null) {
+            val entries = runCatching {
+                val markup = decodeMarkup(zip.readEntry(navItem))
+                EpubToc.parseNav(parseXhtml(markup), navItem.substringBeforeLast('/', ""))
+            }.getOrDefault(emptyList())
+            if (entries.isNotEmpty()) {
+                return entries
+            }
+        }
+
+        val ncxItem = findManifestItemByMediaType(opf, opfDir, NCX_MEDIA_TYPE)
+            ?: findManifestItemByPath(opf, opfDir, NCX_FILE_NAMES)
+            ?: manifest.resources.values.firstOrNull { it.mime.equals(NCX_MEDIA_TYPE, ignoreCase = true) }?.zipPath
+        if (ncxItem != null && zip.getEntry(ncxItem) != null) {
+            val entries = runCatching {
+                EpubToc.parseNcx(parseXml(zip.readEntry(ncxItem), "toc.ncx 文件格式异常。"), ncxItem.substringBeforeLast('/', ""))
+            }.getOrDefault(emptyList())
+            if (entries.isNotEmpty()) {
+                return entries
+            }
+        }
+        return emptyList()
+    }
+
+    /** 按 EPUB 3 的 `properties="nav"` 找 nav 文档。 */
+    private fun findManifestItemByProperty(opf: Document, opfDir: String, property: String): String? {
+        val items = opf.getElementsByTagNameNS("*", "item")
+        for (index in 0 until items.length) {
+            val item = items.item(index) as? Element ?: continue
+            val properties = item.getAttribute("properties")
+            if (properties.split(Regex("""\s+""")).any { it.equals(property, ignoreCase = true) }) {
+                val href = item.getAttribute("href")
+                if (href.isNotBlank()) {
+                    return normalizeZipPath(opfDir, href)
+                }
+            }
+        }
+        return null
+    }
+
+    /** 按 `media-type` 找文件（ncx 用）。 */
+    private fun findManifestItemByMediaType(opf: Document, opfDir: String, mediaType: String): String? {
+        val items = opf.getElementsByTagNameNS("*", "item")
+        for (index in 0 until items.length) {
+            val item = items.item(index) as? Element ?: continue
+            if (item.getAttribute("media-type").equals(mediaType, ignoreCase = true)) {
+                val href = item.getAttribute("href")
+                if (href.isNotBlank()) {
+                    return normalizeZipPath(opfDir, href)
+                }
+            }
+        }
+        return null
+    }
+
+    private fun findManifestItemByPath(opf: Document, opfDir: String, names: Set<String>): String? {
+        val items = opf.getElementsByTagNameNS("*", "item")
+        for (index in 0 until items.length) {
+            val item = items.item(index) as? Element ?: continue
+            val href = item.getAttribute("href")
+            if (href.isBlank()) {
+                continue
+            }
+            val zipPath = normalizeZipPath(opfDir, href)
+            if (zipPath.substringAfterLast('/').lowercase() in names) {
+                return zipPath
+            }
+        }
+        return null
+    }
+
+    /**
+     * 在指定 id 的元素**开标签之后**（内容之前）插入目录哨兵。
+     *
+     * 从后往前插，避免前面的插入打乱后面的下标。定位不到 id 的条目直接丢弃 ——
+     * 它的正文会并入前一个章节（[buildChaptersFromToc] 的闭包算法保证不留空洞）。
+     */
+    private fun insertTocMarkers(body: String, tocEntries: List<TocEntry>): String {
+        if (tocEntries.isEmpty()) {
+            return body
+        }
+        val insertions = tocEntries
+            .filter { it.fragment.isNotBlank() }
+            .mapNotNull { entry -> findElementContentStart(body, entry.fragment)?.let { it to entry.index } }
+            .sortedByDescending { it.first }
+        if (insertions.isEmpty()) {
+            return body
+        }
+        val builder = StringBuilder(body)
+        insertions.forEach { (position, tocIndex) ->
+            builder.insert(position, "$MARK$MARK_TOC:$tocIndex$MARK")
+        }
+        return builder.toString()
+    }
+
+    /** 返回带指定 id 的元素**内容起点**（开标签 `>` 之后的下标）；找不到返回 null。 */
+    private fun findElementContentStart(markup: String, elementId: String): Int? {
+        val pattern = Regex(
+            """<([a-zA-Z][\w:-]*)\b[^>]*\bid\s*=\s*["']${Regex.escape(elementId)}["'][^>]*>""",
+        )
+        return pattern.find(markup)?.range?.last?.plus(1)
+    }
+
+    /**
+     * 由目录生产章节区间（决策 C）。
+     *
+     * 排序键是 `(spine 下标, offset)`：nav / ncx 的条目顺序**不保证**与 spine 一致，
+     * 必须显式排序，否则跨文档的章节会互相穿插。
+     *
+     * 三级兜底：
+     * 1. 单条 TOC fragment 定位失败 → 丢弃，其正文并入前一段；
+     * 2. 一条都没定位到 → 退化成「一篇 spine 一章」（[fallback]）；
+     * 3. spine 也空 → 由调用方补 `Chapter("全文", …)`。
+     */
+    private fun buildChaptersFromToc(
+        selected: List<TocEntry>,
+        titles: List<String>,
+        tocOffsets: Map<Int, Int>,
+        docStartOffsets: Map<String, Int>,
+        spinePaths: List<String>,
+        totalLength: Int,
+        fallback: List<Chapter>,
+    ): List<Chapter> {
+        val spineIndexByPath = spinePaths.withIndex().associate { (index, path) -> path to index }
+        val resolved = selected
+            .mapNotNull { entry ->
+                val offset = tocOffsets[entry.index]
+                    ?: entry.takeIf { it.fragment.isBlank() }?.let { docStartOffsets[it.docPath] }
+                if (offset == null) {
+                    return@mapNotNull null
+                }
+                val spineIndex = spineIndexByPath[entry.docPath] ?: return@mapNotNull null
+                Triple(spineIndex, offset, entry)
+            }
+            .filter { (_, offset, _) -> offset in 0 until totalLength }
+            .sortedWith(compareBy({ it.first }, { it.second }))
+            .distinctBy { it.second }
+            .toList()
+
+        if (resolved.isEmpty()) {
+            // 兜底 2：一篇 spine 一章。顺手把区间拉成连续 —— 写入时两篇之间是 "\n\n"，
+            // 直接取各自 [start, offset) 会在接缝处留 2 字符空洞。
+            return contiguous(fallback, totalLength)
+        }
+
+        val starts = mutableListOf<Int>()
+        val names = mutableListOf<String>()
+        val firstStart = resolved.first().second
+        // 与 TXT 侧同一口径：章节区间必须连续覆盖 0..totalLength。
+        // 前导不足 PREAMBLE_MIN_LENGTH 就把首章钳到 0，够长才单独补「开头」。
+        if (firstStart >= PREAMBLE_MIN_LENGTH) {
+            starts += 0
+            names += "开头"
+        }
+        resolved.forEach { (_, offset, entry) ->
+            val start = if (starts.isEmpty()) 0 else offset
+            starts += start
+            names += titles.getOrNull(entry.index)?.take(80).orEmpty()
+                .ifBlank { "第 ${starts.size} 章" }
+        }
+
+        return starts.mapIndexedNotNull { index, start ->
+            val end = starts.getOrElse(index + 1) { totalLength }
+            if (end > start) Chapter(names[index], start, end) else null
+        }
+    }
+
+    /**
+     * 把章节区间拉成连续覆盖 `0..totalLength`：每段终点 = 下一段起点，末段终点 = 全文长度。
+     *
+     * 用于「一篇 spine 一章」的兜底路径 —— 两篇之间写了 "\n\n"，直接取各自
+     * `[start, offset)` 会在接缝处留下 2 字符的空洞。
+     */
+    private fun contiguous(chapters: List<Chapter>, totalLength: Int): List<Chapter> {
+        if (chapters.isEmpty()) {
+            return chapters
+        }
+        return chapters.mapIndexed { index, chapter ->
+            val end = chapters.getOrNull(index + 1)?.startOffset ?: totalLength
+            chapter.copy(endOffset = end)
+        }.filter { it.endOffset > it.startOffset }
+    }
+
+    /** 前导内容达到这个长度才补「开头」章节（与 [ChapterParser] 同口径）。 */
+    private const val PREAMBLE_MIN_LENGTH = 200
+
+    /** nav 兜底文件名。不含 `toc.xhtml` —— 那通常是目录**正文页**，不是 EPUB 3 nav 文档。 */
+    private val NAV_FILE_NAMES = setOf("nav.xhtml", "nav.html", "nav.htm")
+    private val NCX_FILE_NAMES = setOf("toc.ncx", "ncx.ncx")
+    private const val NCX_MEDIA_TYPE = "application/x-dtbncx+xml"
 
     // ------------------------------------------------------------------ 脚注识别
 
@@ -669,7 +916,8 @@ object EpubBookLoader {
         if (anchorStart < innerStart || anchorStart > innerEnd) {
             return false
         }
-        return body.substring(innerStart, anchorStart).isBlank()
+        // 目录哨兵可能插在块首（该块正是某个 TOC 条目的落点），剥掉再判空白。
+        return tocMarkerRegex.replace(body.substring(innerStart, anchorStart), "").isBlank()
     }
 
     /** 注释正文 = 该块元素去掉自身锚点之后的全部内容。 */
@@ -862,7 +1110,11 @@ object EpubBookLoader {
                     }
 
                     MARK_REF -> notesByKey[value]?.let { note ->
-                        pieces += BodyPiece.FootnoteRef(note.key, note.number, note.label)
+                        pieces += BodyPiece.FootnoteRef(note.key, note.number, note.label, note.text)
+                    }
+
+                    MARK_TOC -> value.toIntOrNull()?.let { tocIndex ->
+                        pieces += BodyPiece.TocAnchor(tocIndex)
                     }
                 }
             }
@@ -872,12 +1124,17 @@ object EpubBookLoader {
         return pieces
     }
 
-    /** 哨兵是否独占一行：独占则是块级图，与文字同框则是行内图。 */
+    /**
+     * 哨兵是否独占一行：独占则是块级图，与文字同框则是行内图。
+     *
+     * 判断前先剥掉目录哨兵 `\u0000TOC:n\u0000`：它们常插在块元素的开标签之后，
+     * 与图片同处一行，不剥掉会把块级图误判成行内图。
+     */
     private fun isAloneOnLine(marked: String, start: Int, end: Int): Boolean {
         val lineStart = marked.lastIndexOf('\n', start - 1).let { if (it < 0) 0 else it + 1 }
         val lineEnd = marked.indexOf('\n', end + 1).let { if (it < 0) marked.length else it }
-        val before = marked.substring(lineStart, start)
-        val after = marked.substring((end + 1).coerceAtMost(lineEnd), lineEnd)
+        val before = tocMarkerRegex.replace(marked.substring(lineStart, start), "")
+        val after = tocMarkerRegex.replace(marked.substring((end + 1).coerceAtMost(lineEnd), lineEnd), "")
         return before.isBlank() && after.isBlank()
     }
 
@@ -938,23 +1195,6 @@ object EpubBookLoader {
             lowerHref.endsWith(".xhtml") ||
             lowerHref.endsWith(".html") ||
             lowerHref.endsWith(".htm")
-    }
-
-    private fun normalizeZipPath(baseDir: String, href: String): String {
-        val decodedHref = URLDecoder.decode(href.substringBefore('#'), utf8)
-            .replace('\\', '/')
-        val parts = mutableListOf<String>()
-        val fullPath = listOf(baseDir, decodedHref)
-            .filter { it.isNotBlank() }
-            .joinToString("/")
-        fullPath.split('/').forEach { part ->
-            when (part) {
-                "", "." -> Unit
-                ".." -> if (parts.isNotEmpty()) parts.removeAt(parts.lastIndex)
-                else -> parts += part
-            }
-        }
-        return parts.joinToString("/")
     }
 
     private fun parseXml(bytes: ByteArray, errorMessage: String): Document {
@@ -1435,7 +1675,9 @@ object EpubBookLoader {
         if (IMAGE_TAG_REGEX.containsMatchIn(inner)) {
             return null
         }
-        val label = stripInlineMarkup(inner)
+        // 目录哨兵可能就插在这个 <a> 的内容开头（TOC 指向的正是这个锚点），
+        // 必须先剥掉 —— 否则锚文本长度被哨兵撑大，整对脚注会被 N2 误杀。
+        val label = stripInlineMarkup(tocMarkerRegex.replace(inner, ""))
         if (label.length > MAX_MARKER_LABEL_LENGTH || BACK_LINK_REGEX.containsMatchIn(label)) {
             return null
         }
@@ -1449,7 +1691,21 @@ object EpubBookLoader {
 
         data class Image(val spec: ImageSpec, val inline: Boolean) : BodyPiece
 
-        data class FootnoteRef(val footnoteId: String, val number: Int, val label: String) : BodyPiece
+        /**
+         * 一个脚注引用点。
+         *
+         * @property text 注释正文。带在引用点上，`ChapterWriter.flushFootnotes` 就能直接
+         *   把注释写进「首次引用它的那一章」末尾，不必反查注释表、也不必持有跨文档状态。
+         */
+        data class FootnoteRef(
+            val footnoteId: String,
+            val number: Int,
+            val label: String,
+            val text: String,
+        ) : BodyPiece
+
+        /** 目录锚点：只用于记录章节起点，不产 Block、不推进 offset。 */
+        data class TocAnchor(val tocIndex: Int) : BodyPiece
     }
 
     /**
@@ -1461,6 +1717,27 @@ object EpubBookLoader {
     private class ChapterWriter(private val blocks: MutableList<Block>) {
         var offset: Int = 0
             private set
+
+        /** 目录条目下标 → 它在 plainText 中的偏移。由 [BodyPiece.TocAnchor] 记录。 */
+        val tocOffsets = mutableMapOf<Int, Int>()
+
+        /** 本章（自上次 flush 起）出现过的引用点，按出现顺序。 */
+        private val pending = mutableListOf<BodyPiece.FootnoteRef>()
+
+        /**
+         * 本文档**已写过**的注释键。
+         *
+         * 按文档重置，不能全书记：`footnoteId` 只在文档内唯一（b1 有 15 个 id 跨文档复用）。
+         * 注：改用 `EpubFootnote.key`（`docId#id`）后全书级去重也不会误判，
+         * 但按文档重置仍然正确、集合更小。
+         */
+        private val writtenInDoc = mutableSetOf<String>()
+
+        /** 开始一篇新文档：清空本章待写注释与本文档的去重集合。 */
+        fun startDocument() {
+            pending.clear()
+            writtenInDoc.clear()
+        }
 
         fun text(value: String, style: LineStyle = LineStyle.BODY) {
             if (value.isEmpty()) {
@@ -1511,9 +1788,61 @@ object EpubBookLoader {
                         val start = offset
                         offset += label.length
                         blocks += FootnoteRefBlock(start, offset, piece.footnoteId, piece.number, piece.label)
+                        pending += piece
+                    }
+
+                    is BodyPiece.TocAnchor -> {
+                        // 先收掉上一章的注释：否则【注释】块会被算进**下一章**，
+                        // 下一章的 startOffset 落在注释里，目录跳转错。
+                        flushFootnotes()
+                        tocOffsets[piece.tocIndex] = offset
                     }
                 }
             }
+        }
+
+        /**
+         * 把「本章首次引用到」的注释追加到章末；没有新注释时**一个字符都不写**。
+         *
+         * 【注释】标题的幂等就在这里：本章没有引用点、或引用到的注释前面章节都写过，
+         * 连 `\n\n` 都不会出现。
+         */
+        fun flushFootnotes() {
+            val fresh = pending.filter { it.footnoteId !in writtenInDoc }
+            pending.clear()
+            if (fresh.isEmpty()) {
+                return
+            }
+            text("\n\n【注释】\n")
+            fresh.forEachIndexed { index, ref ->
+                if (index > 0) {
+                    text("\n")
+                }
+                footnoteBody(ref.footnoteId, ref.number, ref.text)
+            }
+            fresh.forEach { writtenInDoc += it.footnoteId }
+        }
+
+        /**
+         * 文档末尾兜底：把**从未被任何引用点引用**的注释写掉，避免丢内容。
+         *
+         * 无 TOC 的降级路径下 `splitMarkedBody` 产不出 `TocAnchor`，只有文档末尾这一次
+         * 写入机会 → 行为退化成 0.8.x 的「全部注释在文档末尾」。**降级安全。**
+         */
+        fun appendOrphanNotes(notes: List<EpubFootnote>) {
+            flushFootnotes()
+            val orphans = notes.filter { it.key !in writtenInDoc }
+            if (orphans.isEmpty()) {
+                return
+            }
+            text("\n\n【注释】\n")
+            orphans.forEachIndexed { index, note ->
+                if (index > 0) {
+                    text("\n")
+                }
+                footnoteBody(note.key, note.number, note.text)
+            }
+            orphans.forEach { writtenInDoc += it.key }
         }
 
         fun footnoteBody(footnoteId: String, number: Int, bodyText: String) {
