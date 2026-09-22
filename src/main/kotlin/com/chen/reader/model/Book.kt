@@ -66,13 +66,7 @@ private fun buildOffsets(blocks: List<Block>): IntArray {
 }
 
 private fun buildHotSpots(blocks: List<Block>): List<HotSpot> {
-    // 按 id 分组**保留全部**注释条目（并保持块的原有顺序）。
-    // 不能再用全书级 `associateBy`：`footnoteId` 只在文档内唯一，撞 key 时 `associateBy`
-    // 只保留最后一个，会把前面章节的引用点解析到别章的注释正文（详见 [resolveFootnoteBody]）。
-    val footnoteBodies = blocks
-        .filterIsInstance<FootnoteBodyBlock>()
-        .groupBy { it.footnoteId }
-
+    val footnoteBodies = blocks.filterIsInstance<FootnoteBodyBlock>().associateBy { it.footnoteId }
     val result = mutableListOf<HotSpot>()
     blocks.forEachIndexed { index, block ->
         when (block) {
@@ -101,7 +95,7 @@ private fun buildHotSpots(blocks: List<Block>): List<HotSpot> {
                 plainEnd = block.plainEnd,
                 footnoteId = block.footnoteId,
                 number = block.number,
-                body = resolveFootnoteBody(footnoteBodies, block),
+                body = footnoteBodies[block.footnoteId]?.text.orEmpty(),
                 label = block.label,
             )
 
@@ -109,34 +103,6 @@ private fun buildHotSpots(blocks: List<Block>): List<HotSpot> {
         }
     }
     return result
-}
-
-/**
- * 解析某个引用点对应的注释正文。
- *
- * ## 为什么不能全书级 `associateBy`
- *
- * `footnoteId` 只在**文档内**唯一，但不少转换器在不同 XHTML 文档之间复用
- * `sd1eNN` / `d1eNN` 这类 id（实测 b1 有 15 个 id 出现在 ≥2 个文档）。
- * `associateBy` 撞 key 时保留最后一个，于是前面章节的引用点会解析到**别的章节**的注释正文，
- * 弹窗显示错内容 —— 实测 b1 有 16/296 个引用点中招（0.7.0 起就有 1 处，属既有缺陷）。
- *
- * ## 解析规则：取引用点**之后**第一个同名条目
- *
- * 这不是启发式，而是**布局保证**：`appendFootnoteSummary` 把注释汇总区**永远追加在本章末尾**，
- * 而引用点一定排在它之前。所以引用点之后第一个同名 `FootnoteBodyBlock` 必然同章。
- *
- * 兜底：找不到时退回最后一个同名条目（等价于改动前的行为），避免把「有正文」变成「空弹窗」。
- *
- * 注：仅影响派生的可点击热区，**不触碰 `Book.plainText`**，故不构成 breaking change。
- */
-private fun resolveFootnoteBody(
-    bodiesById: Map<String, List<FootnoteBodyBlock>>,
-    ref: FootnoteRefBlock,
-): String {
-    val candidates = bodiesById[ref.footnoteId] ?: return ""
-    return candidates.firstOrNull { it.plainStart >= ref.plainEnd }?.text
-        ?: candidates.lastOrNull()?.text.orEmpty()
 }
 
 data class Chapter(

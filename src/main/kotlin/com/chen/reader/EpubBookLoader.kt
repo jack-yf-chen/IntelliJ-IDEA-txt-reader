@@ -264,7 +264,7 @@ object EpubBookLoader {
             if (index > 0) {
                 writer.text("\n")
             }
-            writer.footnoteBody(note.id, note.number, note.text)
+            writer.footnoteBody(note.key, note.number, note.text)
         }
     }
 
@@ -691,7 +691,7 @@ object EpubBookLoader {
         return anchorRegex.replace(body) { match ->
             val href = attributeValue(match.groupValues[1], "href") ?: return@replace match.value
             val note = notesByFragment[href.substringAfterLast('#', "")] ?: return@replace match.value
-            "$MARK$MARK_REF:${note.id}$MARK"
+            "$MARK$MARK_REF:${note.key}$MARK"
         }
     }
 
@@ -824,7 +824,9 @@ object EpubBookLoader {
         images: List<ImageSpec>,
         notes: List<EpubFootnote>,
     ): List<BodyPiece> {
-        val notesById = notes.associateBy { it.id }
+        // 哨兵里带的是 EpubFootnote.key（docId#id），所以这里必须按 key 反查，
+        // 不能按 id —— id 只在文档内唯一，跨文档复用时会查到别章的注释。
+        val notesByKey = notes.associateBy { it.key }
         val pieces = mutableListOf<BodyPiece>()
         val buffer = StringBuilder()
         var index = 0
@@ -859,8 +861,8 @@ object EpubBookLoader {
                         pieces += BodyPiece.Image(spec, inline = !isAloneOnLine(marked, index, end))
                     }
 
-                    MARK_REF -> notesById[value]?.let { note ->
-                        pieces += BodyPiece.FootnoteRef(note.id, note.number, note.label)
+                    MARK_REF -> notesByKey[value]?.let { note ->
+                        pieces += BodyPiece.FootnoteRef(note.key, note.number, note.label)
                     }
                 }
             }
@@ -1364,7 +1366,10 @@ object EpubBookLoader {
      * @property docId 所属文档（zip 路径）；与 [elementIndex] 一起构成去重键。
      * @property elementIndex 文档内元素序号。通道 A 取 `[0, n)`，通道 B 取
      *   `[MUTUAL_ELEMENT_INDEX_BASE, …)`，两区间互不相交，避免去重键误撞。
-     * @property id 注释 id：引用点锚点的 id（正文里 `[注N]` 指向它）。
+     * @property id 注释 id：引用点锚点的 id（`replaceFootnoteRefs` 要用它在正文里
+     *   匹配 `<a id="…">`，因此**不能**被 [key] 取代）。
+     *   注意它只在**文档内**唯一：不少转换器（b1 就是）跨 XHTML 文档复用
+     *   `sd1eNN` / `d1eNN`，所以引用点与注释正文的配对必须走 [key]。
      * @property refFragment 指向注释条目的 href fragment。
      * @property number 插件显示的编号（可能和书里原本的编号不同）。
      * @property label 书里原本的标记文本，形如 "[3]"，用于弹窗标题与对不上时排查。
@@ -1380,7 +1385,18 @@ object EpubBookLoader {
         val label: String,
         val text: String,
         val bodyBlockRange: IntRange? = null,
-    )
+    ) {
+        /**
+         * 全书唯一的配对键：`"$docId#$id"`。
+         *
+         * 引用点 `[注N]` 的 [FootnoteRefBlock] 与章末 [FootnoteBodyBlock] 靠它配对。
+         * 直接用 [id] 会撞车：b1 有 15 个 id 出现在 ≥2 个 XHTML 文档里，全书级
+         * `associateBy` 只保留最后一个，于是前面章节的引用点弹出**别章**的注释正文
+         * （实测 16/296 中招）。把 docId 并进键里，配对就退化成精确匹配，
+         * 不再需要"取引用点之后第一个同名条目"这类位置启发式。
+         */
+        val key: String get() = "$docId#$id"
+    }
 
     /** 通道 A 的 DOM 命中结果：一个带 footnote 语义、且带 id 的元素。 */
     private data class FootnoteElementHit(
