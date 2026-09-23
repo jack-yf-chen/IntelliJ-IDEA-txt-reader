@@ -17,6 +17,7 @@ import java.awt.Cursor
 import java.awt.Dimension
 import java.awt.Font
 import java.awt.Point
+import java.awt.Rectangle
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.awt.event.MouseMotionAdapter
@@ -30,6 +31,7 @@ import javax.swing.JPanel
 import javax.swing.JScrollPane
 import javax.swing.ListModel
 import javax.swing.ListSelectionModel
+import javax.swing.Scrollable
 import javax.swing.SwingConstants
 import javax.swing.SwingUtilities
 import kotlin.io.path.exists
@@ -51,13 +53,10 @@ class BookshelfPanel(private val project: Project) : JPanel(BorderLayout()), Dis
     private val usageHint = JLabel("点击卡片继续阅读　·　☆ / ★ 收藏或取消收藏　·　✕ 从书架移除")
     private val recentHeader = sectionHeader("最近阅读")
     private val favoriteHeader = sectionHeader("我的收藏")
-    private val contentPanel = JPanel()
+    private val contentPanel = StretchPanel()
 
     init {
         background = UIUtil.getListBackground()
-        contentPanel.layout = BoxLayout(contentPanel, BoxLayout.Y_AXIS)
-        contentPanel.isOpaque = true
-        contentPanel.background = UIUtil.getListBackground()
         contentPanel.add(emptyLabel)
         contentPanel.add(usageHint)
         contentPanel.add(recentHeader)
@@ -318,8 +317,12 @@ class BookshelfPanel(private val project: Project) : JPanel(BorderLayout()), Dis
     }
 
     /**
-     * 固定行高的列表：高度 = 行数 × `CELL_HEIGHT`，宽度交给 `BoxLayout` 算，
-     * 这样外层那一个 `JBScrollPane` 就是唯一的滚动条，列表自身不滚动。
+     * 固定行高的列表：高度 = 行数 × `CELL_HEIGHT`，**宽度交给外层 `BoxLayout` 拉满**。
+     *
+     * 注意 [getMaximumSize] 的宽度必须是 `Int.MAX_VALUE`：`BoxLayout(Y_AXIS)` 是按
+     * 组件的**最大尺寸**来分配宽度的，若把最大宽度也写死成首选宽度（渲染器算出来的宽度
+     * 可能只有几十像素），整张卡片就会被压成窄条 —— 实机反馈"书籍图片很窄、收藏按钮
+     * 挤在一起"就是这个原因。高度仍然锁死为首选高度，避免列表自己纵向拉伸。
      */
     private class ShelfList(model: ListModel<ShelfEntry>) : JBList<ShelfEntry>(model) {
         init {
@@ -338,7 +341,45 @@ class BookshelfPanel(private val project: Project) : JPanel(BorderLayout()), Dis
             return BookCard.preferredFor(super.getPreferredSize(), rows)
         }
 
-        override fun getMaximumSize(): Dimension = getPreferredSize()
+        override fun getMaximumSize(): Dimension =
+            Dimension(Int.MAX_VALUE, getPreferredSize().height)
+    }
+
+    /**
+     * 滚动区的内容容器：宽度**永远铺满视口**。
+     *
+     * 默认的 `JScrollPane` 语义是"视图宽度 = 视图的首选宽度"，而本视图的首选宽度来自
+     * [ShelfList] → 渲染器（一张没有子组件的 `JPanel`，首选宽度接近 0），于是实机上出现
+     * "整张卡片只有封面那么宽、☆/✕ 挤在最左边"。实现 [Scrollable] 并让
+     * [getScrollableTracksViewportWidth] 返回 `true` 之后，`JViewport` 会把**视口宽度回灌**
+     * 给本容器，内部的 `BoxLayout(Y_AXIS)` 才有足额宽度可以分给每一行卡片。
+     *
+     * 高度保持 `tracksViewportHeight = false`，这样内容超出时才出现纵向滚动条。
+     */
+    private class StretchPanel : JPanel(), Scrollable {
+        init {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+            isOpaque = true
+            background = UIUtil.getListBackground()
+        }
+
+        override fun getPreferredScrollableViewportSize(): Dimension = preferredSize
+
+        override fun getScrollableUnitIncrement(
+            visibleRect: Rectangle?,
+            orientation: Int,
+            direction: Int,
+        ): Int = JBUI.scale(16)
+
+        override fun getScrollableBlockIncrement(
+            visibleRect: Rectangle?,
+            orientation: Int,
+            direction: Int,
+        ): Int = (visibleRect?.height ?: BookCard.CELL_HEIGHT)
+
+        override fun getScrollableTracksViewportWidth(): Boolean = true
+
+        override fun getScrollableTracksViewportHeight(): Boolean = false
     }
 
     companion object {

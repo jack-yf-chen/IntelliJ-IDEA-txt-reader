@@ -245,6 +245,12 @@
   - **同时去掉 `toolTipText`**（它就是遮挡元凶：要点 ★ 必须先悬浮到卡片上，一悬浮就被自己的 tooltip 盖住）。完整路径改为画在卡片里（中间省略，保留盘符与文件名），文件缺失也直接在卡片里标红；hover 到 ★/✕ 时额外画一圈底框提示"这里能点"。
   - 实测：`compileKotlin` 与 `buildPlugin` 均通过，出包 `intellij-idea-novel-reader-0.11.2.zip`。教训写进备忘：**JList 渲染器里不要指望子组件的文本能可靠绘制，操作入口一律自绘**；**给卡片挂 tooltip 会盖住卡片上的操作入口**。
 
+- 2026-09-23：**升 `0.11.3`（patch，`plainText` 一字未变），修书架「书籍图片很窄、收藏按钮布局不对」** —— 用户第三次截图反馈。0.11.2 的自绘改造让卡片**内容**终于画齐了，但整张卡片只有约 65 px 宽，封面被挤成窄条、★/✕ 歪在最左侧。
+  - **根因（两处叠加，都在宽度上）**：① `BookshelfPanel.ShelfList.getMaximumSize()` 原先返回 `getPreferredSize()`，而 `BoxLayout(Y_AXIS)` 是**按子组件的最大尺寸分配宽度**的 —— 最大宽度被写成首选宽度，卡片就拿不到更多空间；而 `BookCard` 是零子组件的自绘面板，`JList.getPreferredSize()` 量出来的宽度接近 **0**。② 外层 `JScrollPane` 默认语义是「视图宽度 = 视图首选宽度」，容器再宽也传不进去。
+  - **修法**：① `ShelfList.getMaximumSize()` 改为 `Dimension(Int.MAX_VALUE, preferredHeight)` —— 宽度放开、高度仍锁首选（避免列表自己纵向拉伸）；② `BookCard.preferredFor` 的宽度加 `FALLBACK_WIDTH`（320）下限，因为零子组件面板的首选宽度天生是 0；③ 新增私有 `StretchPanel` 作为滚动区容器：实现 `Scrollable`，`getScrollableTracksViewportWidth() = true`（把**视口宽度回灌**给容器，内部 `BoxLayout` 才有足额宽度分给每一行）、`getScrollableTracksViewportHeight() = false`（内容超高才出纵向滚动条），并给出合理的单元/块滚动增量。
+  - **为什么这版才算修完**：前两版都在补「画不画得出来」「看不看得见」，没碰到「宽度从哪来」这条主线。布局 bug 的顺序是**宽度 → 可见性 → 绘制**，倒着修就会反复（0.11.1 改可见性、0.11.2 改绘制，都不见效）。教训写进备忘：**自绘组件没有子组件，首选尺寸会退化成 0，任何把它嵌进 `BoxLayout` / `JScrollPane` 的场合都要显式补宽度兜底**。
+  - 实测：`compileKotlin` 与 `buildPlugin` 通过，出包 `intellij-idea-novel-reader-0.11.3.zip`。★/✕ 的热区矩形（`starRectFor` / `closeRectFor`）与 `paintComponent` 同源，宽度恢复后两者仍然自动同步，不需要改坐标。
+
 ## 后续验证步骤
 
 运行：

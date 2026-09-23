@@ -259,8 +259,12 @@ class BookCard : JPanel(), ListCellRenderer<ShelfEntry> {
         fun closeRectFor(width: Int): Rectangle =
             Rectangle(width - GAP - ICON, GAP, ICON, ICON)
 
-        /** 行的首选尺寸：宽度交给 `JList`，高度 = 行数 × 固定行高。 */
+        /**
+         * 行的首选尺寸：高度 = 行数 × 固定行高；宽度务必带上 [FALLBACK_WIDTH] 兜底 ——
+         * 本卡片是**零子组件**的自绘面板，首选宽度算出来是 0，若原样传给外层的
+         * `JScrollPane`，连宽屏下的卡片都会被压成窄条。
+         */
         fun preferredFor(base: Dimension?, rows: Int): Dimension =
-            Dimension(base?.width ?: FALLBACK_WIDTH, CELL_HEIGHT * rows)
+            Dimension((base?.width ?: 0).coerceAtLeast(FALLBACK_WIDTH), CELL_HEIGHT * rows)
     }
 }
