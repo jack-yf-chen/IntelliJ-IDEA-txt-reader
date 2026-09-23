@@ -256,6 +256,11 @@
     3. **`FALLBACK_WIDTH` / `MIN_BAR_WIDTH` 等阈值原先是未缩放常量**，而 `GAP` / `COVER_W` / `ICON` / `PERCENT_W` 都走 `JBUI.scale` —— 高 DPI（scale=2）下阈值相对偏小、重叠判据随屏幕漂移。改为一律 `JBUI.scale`。
     4. **两个 `ShelfList` 未设 `alignmentX`**（默认 0.5）与显式 `LEFT_ALIGNMENT` 的标签混用 → 整体对齐值约 0.01，列表相对标题右移约 7 px 且略窄；滚轮单元增量固定 16 px 与 120 px 行高脱节（一格只走 1/7 张卡），块增量未防 0。一并修掉。
   - 实测：`compileKotlin` 与 `buildPlugin` 通过，出包 `intellij-idea-novel-reader-0.11.3.zip`。★/✕ 的热区矩形（`starRectFor` / `closeRectFor`）与 `paintComponent` 同源，宽度恢复后两者仍然自动同步，不需要改坐标。
+- 2026-09-23：**0.11.3 第三次补漏 —— 封面按原始尺寸绘制，把整张卡片盖住（用户第四次截图）**。宽度修好后用户立刻发现新问题：封面图大到溢出 120 px 行高、串到下一个分区，标题 / 路径 / 进度条 / 元信息全被压在底下。
+  - **根因**：`BookCard.paintComponent` 里写的是 `cover.paintIcon(this, g2, coverX, coverY)`，而 **`Icon.paintIcon` 是按图标自身尺寸绘制的**，不做任何适配。`BookCoverLoader` 的缩略图最长边是 `COVER_MAX_EDGE = 320`（`BookCoverLoader.kt:153`），b1 实测 **216×320**、b2 226×320、b3 209×320 —— 画进 64×96 的封面槽就是溢出 3 倍多。0.11.2 之前封面在 `JLabel` 里，子组件绘制被裁剪到 `JLabel` 自己的 64×96 边界，所以只是「看起来很窄」（用户第 2 次反馈）；改成整卡自绘后裁剪边界变成整张卡片，溢出就暴露成「盖住一切」。**这是 0.11.2 那次自绘改造带出来的副作用。**
+  - **修法**：新增 `drawCoverFitted(g, icon, boxX, boxY, boxW, boxH)` —— `scale = min(boxW/iconW, boxH/iconH)` 等比缩到槽内并居中，`ImageIcon` 走 `drawImage` + 双线性插值（比变换矩阵快且不失真），其它 `Icon` 走 `translate + scale + paintIcon`，统一在 `try/finally` 里保存恢复 `g.transform`；最后描一圈淡边与卡片底色分界。没有封面时改走 `drawCoverPlaceholder`（淡底 + 居中默认图标），**故意不放大**占位图标 —— 它是 16×16 的 SVG 光栅化结果，拉满 64×96 只会糊，尺寸装不下时干脆只留空槽。
+  - **教训（写进备忘）**：**`Icon.paintIcon` 不缩放到目标框，它按图标自身尺寸画。** 自绘时凡是「图标 / 图片」都要显式算缩放；容器裁剪消失（子组件 → 自绘）时，这类隐患会从「不好看」升级成「盖住别的元素」。
+  - 实测：`compileKotlin` 与 `buildPlugin` 通过，重新出包 `intellij-idea-novel-reader-0.11.3.zip`。
 
 ## 后续验证步骤
 

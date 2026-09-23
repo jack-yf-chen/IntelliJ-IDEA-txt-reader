@@ -15,6 +15,7 @@ import java.awt.Graphics2D
 import java.awt.Rectangle
 import java.awt.RenderingHints
 import javax.swing.Icon
+import javax.swing.ImageIcon
 import javax.swing.JList
 import javax.swing.JPanel
 import javax.swing.ListCellRenderer
@@ -111,10 +112,18 @@ class BookCard : JPanel(), ListCellRenderer<ShelfEntry> {
             val barWidth = contentWidth - percentWidth - GAP
 
             // ---- 封面（内存图标，不解码）
-            val cover = BookCoverLoader.getInstance().coverFor(current.pathKey) ?: DEFAULT_COVER
+            // 必须**等比缩放进封面槽**：`Icon.paintIcon` 是按图标自身尺寸绘制的，而
+            // `BookCoverLoader` 给的缩略图最长边是 320 px（b1 实测 216×320），直接
+            // `paintIcon` 会画出一张比整行卡片还大的图，把标题 / 路径 / 进度条 / 元信息
+            // 全压在底下 —— 实机反馈"封面把卡片内容盖住了"就是这个原因。
             val coverX = GAP
             val coverY = (CELL_HEIGHT - COVER_H) / 2
-            cover.paintIcon(this, g2, coverX, coverY)
+            val cover = BookCoverLoader.getInstance().coverFor(current.pathKey)
+            if (cover != null) {
+                drawCoverFitted(g2, cover, coverX, coverY, COVER_W, COVER_H)
+            } else {
+                drawCoverPlaceholder(g2, coverX, coverY, COVER_W, COVER_H)
+            }
 
             // ---- 标题
             g2.font = listFont.deriveFont(Font.BOLD)
@@ -180,6 +189,59 @@ class BookCard : JPanel(), ListCellRenderer<ShelfEntry> {
             }
         } finally {
             g2.dispose()
+        }
+    }
+
+    /**
+     * 把封面**等比缩放**到 `boxW × boxH` 的槽内并居中，最后描一圈淡边与卡片底色分界。
+     *
+     * 为什么不能直接 `icon.paintIcon`：那是按图标自身尺寸绘制的，而书架缩略图最长边
+     * 是 320 px，直接画会溢出封面槽、盖住整行的文字与进度条。
+     *
+     * 两条分支：[ImageIcon] 走 `drawImage` 双线性缩放（快，且不失真）；其它 [Icon]
+     * （只可能是插画式的 `IconLoader` 图标）用变换矩阵缩放后 `paintIcon`。
+     */
+    private fun drawCoverFitted(g: Graphics2D, icon: Icon, boxX: Int, boxY: Int, boxW: Int, boxH: Int) {
+        val iconW = icon.iconWidth.coerceAtLeast(1)
+        val iconH = icon.iconHeight.coerceAtLeast(1)
+        val scale = minOf(boxW.toDouble() / iconW, boxH.toDouble() / iconH)
+        val drawW = (iconW * scale).toInt().coerceAtLeast(1)
+        val drawH = (iconH * scale).toInt().coerceAtLeast(1)
+        val x = boxX + (boxW - drawW) / 2
+        val y = boxY + (boxH - drawH) / 2
+        val old = g.transform
+        try {
+            val image = (icon as? ImageIcon)?.image
+            if (image != null) {
+                g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
+                g.drawImage(image, x, y, drawW, drawH, null)
+            } else {
+                g.translate(x.toDouble(), y.toDouble())
+                g.scale(drawW.toDouble() / iconW, drawH.toDouble() / iconH)
+                icon.paintIcon(this, g, 0, 0)
+            }
+        } finally {
+            g.transform = old
+        }
+        g.color = COVER_BORDER_COLOR
+        g.drawRect(x, y, drawW - 1, drawH - 1)
+    }
+
+    /**
+     * 没有封面时的占位：淡底 + 居中一个默认书图标。
+     *
+     * 这里**故意不放大**图标 —— 默认图标是 16×16 的 SVG 光栅化结果，拉满 64×96 只会糊。
+     * 尺寸不够时干脆不画，宁可只留一个空槽。
+     */
+    private fun drawCoverPlaceholder(g: Graphics2D, boxX: Int, boxY: Int, boxW: Int, boxH: Int) {
+        g.color = COVER_PLACEHOLDER_COLOR
+        g.fillRect(boxX, boxY, boxW, boxH)
+        g.color = COVER_BORDER_COLOR
+        g.drawRect(boxX, boxY, boxW - 1, boxH - 1)
+        val iconW = DEFAULT_COVER.iconWidth
+        val iconH = DEFAULT_COVER.iconHeight
+        if (iconW in 1..boxW && iconH in 1..boxH) {
+            DEFAULT_COVER.paintIcon(this, g, boxX + (boxW - iconW) / 2, boxY + (boxH - iconH) / 2)
         }
     }
 
@@ -261,6 +323,8 @@ class BookCard : JPanel(), ListCellRenderer<ShelfEntry> {
         private val BAR_TRACK_COLOR = JBColor(0xD5DAE0, 0x3A4350)
         private val BAR_FILL_COLOR = JBColor(0x4A6FA5, 0x6E9BD8)
         private val MISSING_COLOR = JBColor(0xC0392B, 0xE06C5A)
+        private val COVER_BORDER_COLOR = JBColor(0xC8CED6, 0x4A5464)
+        private val COVER_PLACEHOLDER_COLOR = JBColor(0xEDF0F4, 0x333C49)
 
         /** 默认封面占位（`icons/book.svg`）；`IconLoader` 自带缓存，这里只取一次。 */
         val DEFAULT_COVER: Icon by lazy { IconLoader.getIcon("/icons/book.svg", BookCard::class.java) }
