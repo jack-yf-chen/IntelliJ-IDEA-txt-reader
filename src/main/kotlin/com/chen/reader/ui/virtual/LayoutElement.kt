@@ -46,12 +46,29 @@ internal data class TextLineElement(
     override val height: Int,
     val text: String,
     val xPositions: IntArray,
+    /**
+     * 行首**不显示也不占宽度**的字符数（标题的 markdown 前缀 `## `）。
+     *
+     * 这些字符在 `xPositions` 里宽度为 0，但仍然留在 `[startOffset, endOffset)` 区间内 ——
+     * "行覆盖全文"的既有假设不能破，否则 `#` 那几个字符不属于任何行，
+     * 位置恢复 / 选区 / `scrollValueForOffset` 全都会错位。
+     */
+    val hiddenPrefixLength: Int = 0,
+    /**
+     * 整行的水平绘制偏移（标题居中用），≥ 0。
+     *
+     * 只是**绘制偏移**：`plainText` 与字符偏移语义完全不受影响。
+     */
+    val centerShift: Int = 0,
 ) : LayoutElement {
-    /** 字符偏移 → 行内 x 像素（用于画选区高亮） */
+    /** 字符偏移 → 行内 x 像素（**不含** [centerShift]） */
     fun xForOffset(offset: Int): Int {
         val index = (offset - startOffset).coerceIn(0, xPositions.lastIndex)
         return xPositions[index]
     }
+
+    /** 字符偏移 → 实际绘制的 x 像素（含 [centerShift]） */
+    fun drawXForOffset(offset: Int): Int = centerShift + xForOffset(offset)
 
     /** 行内 x 像素 → 字符偏移（用于鼠标划词），取最近的一个字符边界 */
     fun offsetForX(x: Int): Int {
@@ -68,6 +85,14 @@ internal data class TextLineElement(
         }
         return (startOffset + index).coerceIn(startOffset, endOffset)
     }
+
+    /**
+     * 绘制坐标 x → 字符偏移（含 [centerShift] 反算）。
+     *
+     * 结果**不会**落进隐藏前缀里：那些字符没有视觉宽度，点不到它们。
+     */
+    fun offsetForDrawX(x: Int): Int =
+        offsetForX(x - centerShift).coerceAtLeast((startOffset + hiddenPrefixLength).coerceAtMost(endOffset))
 }
 
 /**

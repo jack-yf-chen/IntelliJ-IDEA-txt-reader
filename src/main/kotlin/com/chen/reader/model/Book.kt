@@ -99,6 +99,23 @@ private fun buildHotSpots(blocks: List<Block>): List<HotSpot> {
                 label = block.label,
             )
 
+            // 章末【注释】列表里的 `[注N]` 前缀也要可点。
+            //
+            // 绘制层（buildFootnoteMarkers）早就把这个前缀当链接画了（强调色 + 下划线），
+            // 手型光标也靠 hotSpots 判定 —— 缺了这条热区，读者在全书的注释区里看到的
+            // 每一个 `[注N]` 都是"看着像链接、点了没反应"。b1 296 条、b2 68 条全是死区。
+            //
+            // 只取前缀这 markerLength 个字符（不是整条注释正文），避免整段注释正文都变成
+            // 热区、把划词选区抢走。
+            is FootnoteBodyBlock -> result += FootnoteHotSpot(
+                plainStart = block.plainStart,
+                plainEnd = (block.plainStart + block.markerLength).coerceAtMost(block.plainEnd),
+                footnoteId = block.footnoteId,
+                number = block.number,
+                body = block.text,
+                label = "[注${block.number}]",
+            )
+
             else -> Unit
         }
     }

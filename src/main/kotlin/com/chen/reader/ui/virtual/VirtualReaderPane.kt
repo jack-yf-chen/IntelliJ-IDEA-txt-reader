@@ -388,11 +388,26 @@ internal class VirtualReaderPane : JComponent(), Scrollable {
         var lineStart = 0
         var index = 0
         var currentWidth = 0
+        /** 当前段落的标题前缀长度（0 = 不是标题段落） */
+        var headingPrefix = headingPrefixLengthAt(text, 0)
+        /** 本行**还剩**多少前缀要隐藏：只有标题段落的第一个物理行 > 0 */
+        var headingOnLine = headingPrefix
 
         fun addLine(endLocal: Int) {
             val safeEnd = endLocal.coerceAtLeast(lineStart)
-            result += createLine(text, lineStart, safeEnd, contentInsets.top + nextCursor, baseOffset, metrics)
+            result += createLine(
+                text = text,
+                start = lineStart,
+                end = safeEnd,
+                y = contentInsets.top + nextCursor,
+                baseOffset = baseOffset,
+                metrics = metrics,
+                hiddenPrefixLength = headingOnLine.coerceAtMost(safeEnd - lineStart),
+                center = headingPrefix > 0,
+                maxWidth = maxWidth,
+            )
             nextCursor += lineHeight
+            headingOnLine = 0
         }
 
         while (index < text.length) {
@@ -406,10 +421,17 @@ internal class VirtualReaderPane : JComponent(), Scrollable {
                 index++
                 lineStart = index
                 currentWidth = 0
+                headingPrefix = headingPrefixLengthAt(text, index)
+                headingOnLine = headingPrefix
                 continue
             }
 
-            val charWidth = metrics.charWidth(char).coerceAtLeast(1)
+            // 标题前缀不占宽度，所以既不计入折行宽度，也不计入 xPositions。
+            val charWidth = if (index < lineStart + headingOnLine) {
+                0
+            } else {
+                metrics.charWidth(char).coerceAtLeast(1)
+            }
             if (currentWidth > 0 && currentWidth + charWidth > maxWidth) {
                 addLine(index)
                 lineStart = index
@@ -424,6 +446,16 @@ internal class VirtualReaderPane : JComponent(), Scrollable {
         return nextCursor
     }
 
+    /**
+     * 标题前缀（`#` / `##` / `###` + 紧跟的空白，或到行尾）的长度；不是标题返回 0。
+     *
+     * `anyHeadingRegex` 把 `<h1>~<h3>` 渲染成 `\n\n#* 标题\n\n`，所以这里认 1~3 个 `#`。
+     */
+    private fun headingPrefixLengthAt(text: String, from: Int): Int {
+        val match = headingPrefixRegex.matchAt(text, from) ?: return 0
+        return match.value.length
+    }
+
     private fun createLine(
         text: String,
         start: Int,
@@ -431,16 +463,24 @@ internal class VirtualReaderPane : JComponent(), Scrollable {
         y: Int,
         baseOffset: Int,
         metrics: FontMetrics,
+        hiddenPrefixLength: Int = 0,
+        center: Boolean = false,
+        maxWidth: Int = 0,
     ): TextLineElement {
         val safeStart = start.coerceIn(0, text.length)
         val safeEnd = end.coerceIn(safeStart, text.length)
         val lineText = text.substring(safeStart, safeEnd)
+        val hidden = hiddenPrefixLength.coerceIn(0, lineText.length)
         val xPositions = IntArray(lineText.length + 1)
         var x = 0
         for (index in lineText.indices) {
-            x += metrics.charWidth(lineText[index]).coerceAtLeast(1)
+            // 标题的 markdown 前缀只是标记、不显示，宽度记 0。
+            if (index >= hidden) {
+                x += metrics.charWidth(lineText[index]).coerceAtLeast(1)
+            }
             xPositions[index + 1] = x
         }
+        val visibleWidth = xPositions[lineText.length]
         return TextLineElement(
             startOffset = baseOffset + safeStart,
             endOffset = baseOffset + safeEnd,
@@ -448,6 +488,8 @@ internal class VirtualReaderPane : JComponent(), Scrollable {
             height = lineHeight,
             text = lineText,
             xPositions = xPositions,
+            hiddenPrefixLength = hidden,
+            centerShift = if (center) ((maxWidth - visibleWidth) / 2).coerceAtLeast(0) else 0,
         )
     }
 
@@ -704,7 +746,8 @@ internal class VirtualReaderPane : JComponent(), Scrollable {
     /** 在本行里找 `point` 命中的热区：热区按 `plainStart` 有序，二分定位后线性扫本行。 */
     private fun hotSpotInLine(line: TextLineElement, point: Point): HotSpot? {
         val spots = book?.hotSpots ?: return null
-        val x = point.x - contentInsets.left
+        // 标题行整行右移了 centerShift，命中判定要用同一套坐标，否则点不中。
+        val x = point.x - contentInsets.left - line.centerShift
         var index = spots.binarySearch { spot ->
             when {
                 line.startOffset < spot.plainStart -> 1
@@ -771,13 +814,14 @@ internal class VirtualReaderPane : JComponent(), Scrollable {
     }
 
     private fun paintLineSelection(g: Graphics2D, line: TextLineElement, from: Int, to: Int) {
-        val selectedStart = maxOf(from, line.startOffset)
+        // 标题的 markdown 前缀不显示，选区也不该盖到它头上。
+        val selectedStart = maxOf(from, line.startOffset + line.hiddenPrefixLength)
         val selectedEnd = minOf(to, line.endOffset)
         if (selectedStart >= selectedEnd) {
             return
         }
-        val x = contentInsets.left + line.xForOffset(selectedStart)
-        val width = (line.xForOffset(selectedEnd) - line.xForOffset(selectedStart)).coerceAtLeast(JBUI.scale(2))
+        val x = contentInsets.left + line.drawXForOffset(selectedStart)
+        val width = (line.drawXForOffset(selectedEnd) - line.drawXForOffset(selectedStart)).coerceAtLeast(JBUI.scale(2))
         g.fillRect(x, line.y, width, line.height)
     }
 
@@ -788,7 +832,8 @@ internal class VirtualReaderPane : JComponent(), Scrollable {
         }
         val element = elements[elementIndexForY(point.y)]
         val offset = when (element) {
-            is TextLineElement -> element.offsetForX((point.x - contentInsets.left).coerceAtLeast(0))
+            // 走 offsetForDrawX：标题行整行右移了 centerShift，划词要跟着反算。
+            is TextLineElement -> element.offsetForDrawX((point.x - contentInsets.left).coerceAtLeast(0))
             // 图片没有字符位置，落到块起点，保证选区仍是合法的 plainText 区间。
             is ImageElement -> element.startOffset
         }
@@ -862,24 +907,29 @@ internal class VirtualReaderPane : JComponent(), Scrollable {
         val segments = footnoteSegmentsIn(line)
         val baseX = contentInsets.left
         val baselineY = line.y + ascent
+        // 标题的 markdown 前缀（"## "）只是标记，不画出来。
+        val visibleStart = line.startOffset + line.hiddenPrefixLength
         if (segments.isEmpty()) {
             g.color = foregroundColor
-            drawWeightedText(g, line.text, baseX, baselineY)
+            drawTextRange(g, line, visibleStart, line.endOffset, baseX, baselineY)
             return
         }
 
-        var cursor = line.startOffset
+        var cursor = visibleStart
         segments.forEach { segment ->
-            if (segment.startOffset > cursor) {
+            val from = maxOf(segment.startOffset, visibleStart)
+            if (from > cursor) {
                 g.color = foregroundColor
-                drawTextRange(g, line, cursor, segment.startOffset, baseX, baselineY)
+                drawTextRange(g, line, cursor, from, baseX, baselineY)
             }
-            g.color = footnoteAccentColor
-            drawTextRange(g, line, segment.startOffset, segment.endOffset, baseX, baselineY)
-            val fromX = baseX + line.xForOffset(segment.startOffset)
-            val toX = baseX + line.xForOffset(segment.endOffset)
-            drawUnderline(g, fromX, toX, baselineY)
-            cursor = segment.endOffset
+            if (segment.endOffset > from) {
+                g.color = footnoteAccentColor
+                drawTextRange(g, line, from, segment.endOffset, baseX, baselineY)
+                val fromX = baseX + line.drawXForOffset(from)
+                val toX = baseX + line.drawXForOffset(segment.endOffset)
+                drawUnderline(g, fromX, toX, baselineY)
+            }
+            cursor = maxOf(cursor, segment.endOffset)
         }
         if (cursor < line.endOffset) {
             g.color = foregroundColor
@@ -902,7 +952,7 @@ internal class VirtualReaderPane : JComponent(), Scrollable {
         if (localFrom == localTo) {
             return
         }
-        drawWeightedText(g, line.text.substring(localFrom, localTo), baseX + line.xForOffset(from), baselineY)
+        drawWeightedText(g, line.text.substring(localFrom, localTo), baseX + line.drawXForOffset(from), baselineY)
     }
 
     /** 脚注标记的下划线：贴在基线下方一点，视觉上更接近"这是个链接"。 */
@@ -1093,5 +1143,13 @@ internal class VirtualReaderPane : JComponent(), Scrollable {
 
         /** 本组件缓存的已解码位图上限 */
         const val MAX_CACHED_IMAGES = 32
+
+        /**
+         * 标题行的 markdown 前缀：`#` / `##` / `##` 后面紧跟空白（或到行尾）。
+         *
+         * 与数据层 `anyHeadingRegex` 的产出 `"\n\n#* 标题\n\n"` 对齐（h1~h3 → 1~3 个 `#`）。
+         * 用 `matchAt` 精确锚在段落起点，不做全文搜索。
+         */
+        val headingPrefixRegex = Regex("""[ \t]*#{1,3}(?:[ \t]+|$)""")
     }
 }
