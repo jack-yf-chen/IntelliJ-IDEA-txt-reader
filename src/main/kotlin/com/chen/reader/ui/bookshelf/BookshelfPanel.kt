@@ -94,7 +94,14 @@ class BookshelfPanel(private val project: Project) : JPanel(BorderLayout()), Dis
         emptyLabel.isVisible = true
 
         add(buildToolbar(), BorderLayout.NORTH)
-        add(JScrollPane(contentPanel).apply { border = JBUI.Borders.empty() }, BorderLayout.CENTER)
+        add(JScrollPane(contentPanel).apply {
+            border = JBUI.Borders.empty()
+            // 内容比视口矮时（最典型是空态那一屏），`ViewportLayout` 只对"非 Scrollable
+            // 的 view"做撑满处理，而 [StretchPanel] 是 Scrollable 且纵向不跟随视口 ——
+            // 视口里多出来的那块会由 `JViewport` 自己画，取的是 `Viewport.background`，
+            // 与列表底色不是一个 UIManager key，主题下能看出色差。这里显式对齐。
+            viewport.background = UIUtil.getListBackground()
+        }, BorderLayout.CENTER)
     }
 
     private fun buildToolbar(): JPanel {
@@ -331,6 +338,10 @@ class BookshelfPanel(private val project: Project) : JPanel(BorderLayout()), Dis
             isOpaque = true
             background = UIUtil.getListBackground()
             border = JBUI.Borders.empty()
+            // 必须显式左对齐：默认 `getAlignmentX()` 是 0.5，而同层那些 JLabel 显式设了
+            // `LEFT_ALIGNMENT`。混用会让 `BoxLayout` 算出一个约 0.01 的整体对齐值，
+            // 结果是列表相对标题右移几个像素、且略微变窄。
+            alignmentX = LEFT_ALIGNMENT
         }
 
         override fun getPreferredSize(): Dimension {
@@ -365,17 +376,19 @@ class BookshelfPanel(private val project: Project) : JPanel(BorderLayout()), Dis
 
         override fun getPreferredScrollableViewportSize(): Dimension = preferredSize
 
+        // 两个增量都忽略 orientation / direction：宽度跟随视口，永不横向滚动，那两个
+        // 分支不可达（VirtualReaderPane 里同样如此）。
         override fun getScrollableUnitIncrement(
             visibleRect: Rectangle?,
             orientation: Int,
             direction: Int,
-        ): Int = JBUI.scale(16)
+        ): Int = (BookCard.CELL_HEIGHT / SCROLL_ROWS_PER_NOTCH).coerceAtLeast(JBUI.scale(16))
 
         override fun getScrollableBlockIncrement(
             visibleRect: Rectangle?,
             orientation: Int,
             direction: Int,
-        ): Int = (visibleRect?.height ?: BookCard.CELL_HEIGHT)
+        ): Int = (visibleRect?.height ?: BookCard.CELL_HEIGHT).coerceAtLeast(JBUI.scale(16))
 
         override fun getScrollableTracksViewportWidth(): Boolean = true
 
@@ -385,5 +398,8 @@ class BookshelfPanel(private val project: Project) : JPanel(BorderLayout()), Dis
     companion object {
         /** 规模保护：一次最多提交这么多封面请求（历史上限本身只有 [ShelfRules.MAX_RECENT]）。 */
         private const val MAX_COVER_REQUESTS = 30
+
+        /** 滚轮每格滚过几分之一张卡片（单元增量 = 行高 / 这个值）。 */
+        private const val SCROLL_ROWS_PER_NOTCH = 4
     }
 }

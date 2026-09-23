@@ -101,10 +101,14 @@ class BookCard : JPanel(), ListCellRenderer<ShelfEntry> {
             val secondary = if (selected) selectedForeground else UIUtil.getInactiveTextColor()
             val missing = ShelfFormat.isMissing(current)
 
+            // 文本区的右边界**就是 ★ 热区的左边界**，绝不能反向把它撑过图标区：
+            // 原来写的是 `coerceAtLeast(contentX + MIN_CONTENT_WIDTH)`，窄窗口（100% 缩放下
+            // 约 < 224 px）会把标题 / 路径 / 进度条推到 ★ / ✕ 底下叠着画。宽度不够就让
+            // [fitToWidth] 自然截断，宁可少画也不要压住操作入口。
             val contentX = GAP * 2 + COVER_W
-            val contentRight = (width - GAP - ICON * 2 - GAP).coerceAtLeast(contentX + MIN_CONTENT_WIDTH)
-            val contentWidth = contentRight - contentX
-            val barWidth = (contentWidth - PERCENT_W - GAP).coerceAtLeast(MIN_BAR_WIDTH)
+            val contentWidth = (starRectFor(width).x - contentX).coerceAtLeast(0)
+            val percentWidth = PERCENT_W.coerceAtMost(contentWidth)
+            val barWidth = contentWidth - percentWidth - GAP
 
             // ---- 封面（内存图标，不解码）
             val cover = BookCoverLoader.getInstance().coverFor(current.pathKey) ?: DEFAULT_COVER
@@ -125,15 +129,25 @@ class BookCard : JPanel(), ListCellRenderer<ShelfEntry> {
             // ---- 进度条 + 百分比
             val barY = GAP + TITLE_H + PATH_H + JBUI.scale(3)
             val percent = current.percent()
-            if (percent != null) {
+            // 进度条窄到看不出进度时（barWidth < MIN_BAR_WIDTH）干脆不画，
+            // 免得它贴着百分比文字底下；百分比文字同理，宽度不够就整块略过。
+            if (percent != null && barWidth >= MIN_BAR_WIDTH) {
                 g2.color = BAR_TRACK_COLOR
                 g2.fillRect(contentX, barY, barWidth, BAR_H)
                 g2.color = if (selected) selectedForeground else BAR_FILL_COLOR
                 g2.fillRect(contentX, barY, (barWidth * percent / 100).coerceIn(0, barWidth), BAR_H)
             }
-            g2.font = listFont.deriveFont(Font.PLAIN, listFont.size2D - 1f)
-            g2.color = secondary
-            drawRightAligned(g2, ShelfFormat.formatPercent(percent), contentX + contentWidth - PERCENT_W, barY - JBUI.scale(4), PERCENT_W)
+            if (percentWidth >= MIN_PERCENT_WIDTH) {
+                g2.font = listFont.deriveFont(Font.PLAIN, listFont.size2D - 1f)
+                g2.color = secondary
+                drawRightAligned(
+                    g2,
+                    ShelfFormat.formatPercent(percent),
+                    contentX + contentWidth - percentWidth,
+                    barY - JBUI.scale(4),
+                    percentWidth,
+                )
+            }
 
             // ---- 元信息
             val metaText = if (missing) {
@@ -231,9 +245,12 @@ class BookCard : JPanel(), ListCellRenderer<ShelfEntry> {
         /** 卡片固定高度：两个列表共用，也是 `JBList.fixedCellHeight`。 */
         val CELL_HEIGHT: Int = JBUI.scale(120)
 
-        private const val FALLBACK_WIDTH = 320
-        private const val MIN_CONTENT_WIDTH = 80
-        private const val MIN_BAR_WIDTH = 40
+        // 下面几个尺寸阈值一律走 `JBUI.scale`：GAP / COVER_W / ICON / PERCENT_W 都是
+        // 缩放值，若这里留成未缩放常量，高 DPI（scale=2）下阈值就相对偏小，
+        // "什么时候开始重叠"的判据会随屏幕缩放漂移。
+        private val FALLBACK_WIDTH = JBUI.scale(320)
+        private val MIN_BAR_WIDTH = JBUI.scale(40)
+        private val MIN_PERCENT_WIDTH = JBUI.scale(24)
         private const val PATH_MAX_CHARS = 72
 
         private val HOVER_BACKGROUND = JBColor(0xE8EEF7, 0x2C3542)
