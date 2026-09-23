@@ -186,6 +186,9 @@ object EpubBookLoader {
      * 与图片 / 脚注哨兵同构：写盘时插进 XHTML，`splitMarkedBody` 识别成
      * [BodyPiece.TocAnchor]，`ChapterWriter` **只记录 offset、不写 Block**，
      * 所以 `plainText` 一个字符都不会多。
+     *
+     * 插入位置是目标元素**开标签之前**（见 [insertTocMarkers]）：哨兵必须在块级元素
+     * 自己的行边界上，不能落进元素内容里，否则会把渲染出来的一行文字劈成两半。
      */
     private const val MARK_TOC = "TOC"
 
@@ -441,7 +444,16 @@ object EpubBookLoader {
     }
 
     /**
-     * 在指定 id 的元素**开标签之后**（内容之前）插入目录哨兵。
+     * 在指定 id 的元素**开标签之前**插入目录哨兵。
+     *
+     * 必须插在开标签**之前**而不是"内容起点"（开标签 `>` 之后）：
+     * 哨兵是"这一章从这里开始"的位置标记，插进元素内容里就等于把它塞进了
+     * 该元素渲染出来的**那一行文本的中间**。`splitMarkedBody` 会在哨兵处把文本
+     * 劈成两个 [BodyPiece.Text]，而 `ChapterWriter` 遇到 [BodyPiece.TocAnchor] 要先
+     * `flushFootnotes()`，于是整块【注释】被塞进了这一行中间 ——
+     * 标题最常见（`<h2>` 渲染成 `\n\n## 标题\n\n`，哨兵正好落在 `## ` 与标题文字之间），
+     * 表现为"注释后面紧跟的标题被切成多行、标题文字被粘到最后一条注释的尾巴上"（b1 有 55 处）。
+     * 插在开标签之前，哨兵就落在块级元素自己的 `\n\n` 之前，是天然的行边界。
      *
      * 从后往前插，避免前面的插入打乱后面的下标。定位不到 id 的条目直接丢弃 ——
      * 它的正文会并入前一个章节（[buildChaptersFromToc] 的闭包算法保证不留空洞）。
@@ -452,7 +464,7 @@ object EpubBookLoader {
         }
         val insertions = tocEntries
             .filter { it.fragment.isNotBlank() }
-            .mapNotNull { entry -> findElementContentStart(body, entry.fragment)?.let { it to entry.index } }
+            .mapNotNull { entry -> findElementStart(body, entry.fragment)?.let { it to entry.index } }
             .sortedByDescending { it.first }
         if (insertions.isEmpty()) {
             return body
@@ -464,12 +476,12 @@ object EpubBookLoader {
         return builder.toString()
     }
 
-    /** 返回带指定 id 的元素**内容起点**（开标签 `>` 之后的下标）；找不到返回 null。 */
-    private fun findElementContentStart(markup: String, elementId: String): Int? {
+    /** 返回带指定 id 的元素**开标签起点**（`<` 的下标）；找不到返回 null。 */
+    private fun findElementStart(markup: String, elementId: String): Int? {
         val pattern = Regex(
             """<([a-zA-Z][\w:-]*)\b[^>]*\bid\s*=\s*["']${Regex.escape(elementId)}["'][^>]*>""",
         )
-        return pattern.find(markup)?.range?.last?.plus(1)
+        return pattern.find(markup)?.range?.first
     }
 
     /**
@@ -1125,6 +1137,13 @@ object EpubBookLoader {
         val pieces = mutableListOf<BodyPiece>()
         val buffer = StringBuilder()
         var index = 0
+        /**
+         * 目录哨兵接缝的待补偿前导。
+         *
+         * 非 null 表示"刚跨过一个目录哨兵，下一段正文开始时要先补 [seamLead]，并且
+         * 先把原文里紧贴哨兵的空白吃掉"。见 [collapseTocSeam]。
+         */
+        var seamLead: String? = null
 
         fun flush() {
             if (buffer.isNotEmpty()) {
@@ -1135,6 +1154,15 @@ object EpubBookLoader {
 
         while (index < marked.length) {
             if (marked[index] != MARK) {
+                val lead = seamLead
+                if (lead != null) {
+                    if (isSeamWhitespace(marked[index])) {
+                        index++
+                        continue
+                    }
+                    buffer.append(lead)
+                    seamLead = null
+                }
                 buffer.append(marked[index])
                 index++
                 continue
@@ -1145,11 +1173,14 @@ object EpubBookLoader {
                 index++
                 continue
             }
-            flush()
             val payload = marked.substring(index + 1, end)
             val separator = payload.indexOf(':')
+            val kind = if (separator > 0) payload.substring(0, separator) else ""
+            if (kind == MARK_TOC) {
+                collapseTocSeam(buffer)?.let { seamLead = it }
+            }
+            flush()
             if (separator > 0) {
-                val kind = payload.substring(0, separator)
                 val value = payload.substring(separator + 1)
                 when (kind) {
                     MARK_IMAGE -> images.getOrNull(value.toIntOrNull() ?: -1)?.let { spec ->
@@ -1169,6 +1200,40 @@ object EpubBookLoader {
         }
         flush()
         return pieces
+    }
+
+    private fun isSeamWhitespace(char: Char): Boolean = char == '\n' || char == ' ' || char == '\t'
+
+    /**
+     * 目录哨兵不占字符，但它会把一段连续文本劈成两个 [BodyPiece.Text]，
+     * 而 `normalizeStructuredText`（空行折叠）在劈开**之前**就跑完了 —— 哨兵自己那一行
+     * 挡住了折叠，接缝处就会多出空行（源里 `<div></div>` 之类的空块尤其明显）。
+     *
+     * 这里把接缝还原成"哨兵不存在时"的样子：吃掉哨兵两侧的空白，换成一个空行 `\n\n`。
+     * 只有当哨兵**确实落在行边界上**才动；落在行内（目录指向了行内元素）就原样拼接。
+     *
+     * @return 需要给下一段正文补的前导；null 表示不动。
+     */
+    private fun collapseTocSeam(buffer: StringBuilder): String? {
+        if (buffer.isEmpty()) {
+            // 哨兵落在文档开头：前一篇文档末尾的换行已经是分隔符，这里什么都不补，
+            // 只把紧随其后的空白吃掉，避免「前一篇的换行 + 标题自己的换行」凑出两个空行。
+            return ""
+        }
+        var end = buffer.length
+        var hasNewline = false
+        while (end > 0 && isSeamWhitespace(buffer[end - 1])) {
+            if (buffer[end - 1] == '\n') {
+                hasNewline = true
+            }
+            end--
+        }
+        if (!hasNewline) {
+            // 行内接缝（目录指向了行内元素）：动空白会改变词间距，原样拼接。
+            return null
+        }
+        buffer.setLength(end)
+        return "\n\n"
     }
 
     /**
@@ -1772,6 +1837,15 @@ object EpubBookLoader {
         private val pending = mutableListOf<BodyPiece.FootnoteRef>()
 
         /**
+         * 已写入文本尾部的连续 `\n` 个数（取值 0 / 1 / 2，2 表示"两个或更多"）。
+         *
+         * 只服务于 [noteBlockLead]：注释块与前文之间必须**恰好一个空行**，而前文结尾
+         * 可能已经带 0~2 个换行（段落 `</p>` 给 1 个、标题渲染给 2 个）。盲写 `\n\n`
+         * 会在这些接缝上多出空行 —— 这正是用户报的"注释后面被多加了换行"。
+         */
+        private var tailNewlines: Int = 0
+
+        /**
          * 本文档**已写过**的注释键。
          *
          * 按文档重置，不能全书记：`footnoteId` 只在文档内唯一（b1 有 15 个 id 跨文档复用）。
@@ -1793,7 +1867,29 @@ object EpubBookLoader {
             val start = offset
             offset += value.length
             blocks += TextBlock(start, offset, value, style)
+            tailNewlines = countTrailingNewlines(value)
         }
+
+        /** [value] 尾部的连续 `\n` 个数，上限 2。 */
+        private fun countTrailingNewlines(value: String): Int {
+            var count = 0
+            for (index in value.length - 1 downTo 0) {
+                if (value[index] != '\n') {
+                    break
+                }
+                if (++count == 2) {
+                    break
+                }
+            }
+            return count
+        }
+
+        /**
+         * 写【注释】标题之前要补的前导换行：与前文之间**恰好**留一个空行。
+         *
+         * 前文已带 N 个换行就只补 `2 - N` 个；`offset == 0`（全书开头）一个都不补。
+         */
+        private fun noteBlockLead(): String = if (offset == 0) "" else "\n".repeat(2 - tailNewlines)
 
         fun pieces(pieces: List<BodyPiece>) {
             pieces.forEach { piece ->
@@ -1804,6 +1900,7 @@ object EpubBookLoader {
                         val placeholder = imagePlaceholder(piece.spec.alt)
                         val start = offset
                         offset += placeholder.length
+                        tailNewlines = 0
                         blocks += if (piece.inline) {
                             InlineImageBlock(
                                 plainStart = start,
@@ -1835,6 +1932,7 @@ object EpubBookLoader {
                         val start = offset
                         offset += label.length
                         blocks += FootnoteRefBlock(start, offset, piece.footnoteId, piece.number, piece.label)
+                        tailNewlines = 0
                         pending += piece
                     }
 
@@ -1860,7 +1958,7 @@ object EpubBookLoader {
             if (fresh.isEmpty()) {
                 return
             }
-            text("\n\n【注释】\n")
+            text("${noteBlockLead()}【注释】\n")
             fresh.forEachIndexed { index, ref ->
                 if (index > 0) {
                     text("\n")
@@ -1882,7 +1980,7 @@ object EpubBookLoader {
             if (orphans.isEmpty()) {
                 return
             }
-            text("\n\n【注释】\n")
+            text("${noteBlockLead()}【注释】\n")
             orphans.forEachIndexed { index, note ->
                 if (index > 0) {
                     text("\n")
@@ -1897,6 +1995,7 @@ object EpubBookLoader {
             val start = offset
             offset += contribution.length
             blocks += FootnoteBodyBlock(start, offset, footnoteId, number, bodyText)
+            tailNewlines = countTrailingNewlines(contribution)
         }
     }
 
