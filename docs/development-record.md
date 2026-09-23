@@ -238,6 +238,13 @@
   - 顺带给 ✕ 加了二次确认：它就贴在卡片右上角、离鼠标很近，误点会丢掉这本书的阅读进度。
   - 实测（本地构建）：`buildPlugin` 出包 `intellij-idea-novel-reader-0.11.1.zip` 通过；本轮只改 UI 呈现与可见性，未触碰 `plainText`、`BookshelfService` 持久化与热区矩形常量（`starRectFor` / `closeRectFor` 与 `layoutChildren` 仍逐字一致，ICON 是共享常量故热区随图标同步放大）。
 
+- 2026-09-23：**升 `0.11.2`（patch，`plainText` 一字未变），卡片改为整卡自绘 —— 上一版 0.11.1 的可用性修复没治本**。用户二次截图反馈「还是不行」。
+  - **取证方式**：把用户截图解码成逐像素亮度图后发现，卡片区域里**只有封面画出来了**，标题 / 进度条 / 百分比 / meta / ★ / ✕ 全是空白；用户看到的那三行文字（书名 / 路径 / 最后阅读+进度）其实是**鼠标悬浮弹出的 tooltip**，它盖住了卡片，而 tooltip 里没有任何可点元素 —— 所以"看得到书、点不到收藏"。
+  - **根因**：`BookCard` 原来是 `JPanel(null)` + 6 个子 `JLabel` + `setBounds`。渲染器组件不在视图树里，`JList` 只在绘制瞬间 `paint` 它一次，子组件的布局与绘制时机不受控 —— 实测只有带 `Icon` 的封面标签画了出来，所有带 `text` 的标签都没画。
+  - **修法**：`BookCard` 去掉全部子组件，**整卡在 `paintComponent` 里自绘**（封面 `paintIcon` + 标题 / 路径 / 进度条 / 百分比 / meta / ★ / ✕ 全部 `drawString` / `fillRect`）。好处是"画在哪"与 `starRectFor` / `closeRectFor` 描述的热区**同源同常量**，不可能再错位。
+  - **同时去掉 `toolTipText`**（它就是遮挡元凶：要点 ★ 必须先悬浮到卡片上，一悬浮就被自己的 tooltip 盖住）。完整路径改为画在卡片里（中间省略，保留盘符与文件名），文件缺失也直接在卡片里标红；hover 到 ★/✕ 时额外画一圈底框提示"这里能点"。
+  - 实测：`compileKotlin` 与 `buildPlugin` 均通过，出包 `intellij-idea-novel-reader-0.11.2.zip`。教训写进备忘：**JList 渲染器里不要指望子组件的文本能可靠绘制，操作入口一律自绘**；**给卡片挂 tooltip 会盖住卡片上的操作入口**。
+
 ## 后续验证步骤
 
 运行：
