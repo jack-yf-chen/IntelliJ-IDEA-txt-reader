@@ -47,6 +47,8 @@ class BookshelfPanel(private val project: Project) : JPanel(BorderLayout()), Dis
     private val favoriteRenderer = BookCard()
 
     private val emptyLabel = JLabel("还没有阅读记录，打开一本 TXT / EPUB 后会出现在这里。", SwingConstants.CENTER)
+    private val favoriteHint = JLabel("还没有收藏的书籍 —— 把鼠标移到卡片上，点右上角的 ☆ 即可收藏。")
+    private val usageHint = JLabel("点击卡片继续阅读　·　☆ / ★ 收藏或取消收藏　·　✕ 从书架移除")
     private val recentHeader = sectionHeader("最近阅读")
     private val favoriteHeader = sectionHeader("我的收藏")
     private val contentPanel = JPanel()
@@ -57,10 +59,12 @@ class BookshelfPanel(private val project: Project) : JPanel(BorderLayout()), Dis
         contentPanel.isOpaque = true
         contentPanel.background = UIUtil.getListBackground()
         contentPanel.add(emptyLabel)
+        contentPanel.add(usageHint)
         contentPanel.add(recentHeader)
         contentPanel.add(recentList)
         contentPanel.add(Box.createVerticalStrut(JBUI.scale(12)))
         contentPanel.add(favoriteHeader)
+        contentPanel.add(favoriteHint)
         contentPanel.add(favoriteList)
         contentPanel.add(Box.createVerticalGlue())
 
@@ -72,11 +76,21 @@ class BookshelfPanel(private val project: Project) : JPanel(BorderLayout()), Dis
         emptyLabel.foreground = UIUtil.getInactiveTextColor()
         emptyLabel.font = emptyLabel.font.deriveFont(Font.PLAIN)
         emptyLabel.border = JBUI.Borders.empty(24, 12)
+        favoriteHint.foreground = UIUtil.getInactiveTextColor()
+        favoriteHint.font = favoriteHint.font.deriveFont(Font.PLAIN)
+        favoriteHint.border = JBUI.Borders.empty(4, 10, 8, 10)
+        favoriteHint.alignmentX = LEFT_ALIGNMENT
+        usageHint.foreground = UIUtil.getInactiveTextColor()
+        usageHint.font = usageHint.font.deriveFont(Font.PLAIN, usageHint.font.size2D - 1f)
+        usageHint.border = JBUI.Borders.empty(6, 10, 2, 10)
+        usageHint.alignmentX = LEFT_ALIGNMENT
 
         // 初始态：还没 refresh 过，只显示空态文案（用户升级后可能先切到书架再开书）。
+        usageHint.isVisible = false
         recentHeader.isVisible = false
         recentList.isVisible = false
         favoriteHeader.isVisible = false
+        favoriteHint.isVisible = false
         favoriteList.isVisible = false
         emptyLabel.isVisible = true
 
@@ -124,8 +138,12 @@ class BookshelfPanel(private val project: Project) : JPanel(BorderLayout()), Dis
         recentHeader.isVisible = hasBooks
         recentList.isVisible = hasBooks
         emptyLabel.isVisible = !hasBooks
-        favoriteHeader.isVisible = favorites.isNotEmpty()
+        usageHint.isVisible = hasBooks || favorites.isNotEmpty()
+        // 「我的收藏」分区**始终显示**（哪怕是空的并给出操作提示）：
+        // 实机反馈「书架里看不到收藏功能」—— 原来空收藏时连分区标题都隐藏了。
+        favoriteHeader.isVisible = true
         favoriteList.isVisible = favorites.isNotEmpty()
+        favoriteHint.isVisible = favorites.isEmpty()
 
         requestMissingCovers(recent + favorites)
         contentPanel.revalidate()
@@ -259,6 +277,18 @@ class BookshelfPanel(private val project: Project) : JPanel(BorderLayout()), Dis
     }
 
     private fun onRemove(entry: ShelfEntry) {
+        // ✕ 就在卡片右上角，离鼠标很近，误点代价是丢阅读进度 —— 加一次确认。
+        val answer = Messages.showYesNoDialog(
+            project,
+            "确定把《${ShelfFormat.displayTitle(entry, false)}》从书架移除吗？\n阅读进度记录会一起删除。",
+            "从书架移除",
+            "移除",
+            "取消",
+            Messages.getQuestionIcon(),
+        )
+        if (answer != Messages.YES) {
+            return
+        }
         service.remove(entry.pathKey)
         refresh()
     }

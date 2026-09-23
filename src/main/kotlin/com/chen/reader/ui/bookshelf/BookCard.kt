@@ -56,6 +56,9 @@ class BookCard : JPanel(null), ListCellRenderer<ShelfEntry> {
         percentLabel.horizontalAlignment = SwingConstants.RIGHT
         starLabel.horizontalAlignment = SwingConstants.CENTER
         closeLabel.horizontalAlignment = SwingConstants.CENTER
+        // 收藏 / 移除是唯一的两个操作入口，字号放大一档，避免被当成装饰。
+        starLabel.font = starLabel.font.deriveFont(starLabel.font.size2D + 4f)
+        closeLabel.font = closeLabel.font.deriveFont(closeLabel.font.size2D + 2f)
         progressBar.isBorderPainted = false
         progressBar.isStringPainted = false
         add(coverLabel)
@@ -116,10 +119,12 @@ class BookCard : JPanel(null), ListCellRenderer<ShelfEntry> {
         starLabel.foreground = when {
             entry.favorite -> STAR_ON_COLOR
             spot == SPOT_STAR -> STAR_HOVER_COLOR
-            else -> secondary
+            // 未收藏时**不能用** getInactiveTextColor()：它和卡片底色太接近，
+            // 实机反馈"完全看不到收藏入口"。用列表前景色保证可辨识。
+            else -> foreground
         }
         closeLabel.text = "✕"
-        closeLabel.foreground = if (spot == SPOT_CLOSE) CLOSE_HOVER_COLOR else secondary
+        closeLabel.foreground = if (spot == SPOT_CLOSE) CLOSE_HOVER_COLOR else foreground
 
         toolTipText = buildTooltip(entry, missing)
         layoutChildren(width)
@@ -160,7 +165,7 @@ class BookCard : JPanel(null), ListCellRenderer<ShelfEntry> {
         private val GAP = JBUI.scale(8)
         private val COVER_W = JBUI.scale(64)
         private val COVER_H = JBUI.scale(96)
-        private val ICON = JBUI.scale(20)
+        private val ICON = JBUI.scale(24)
         private val TITLE_H = JBUI.scale(20)
         private val LABEL_H = JBUI.scale(16)
         private val BAR_H = JBUI.scale(8)
