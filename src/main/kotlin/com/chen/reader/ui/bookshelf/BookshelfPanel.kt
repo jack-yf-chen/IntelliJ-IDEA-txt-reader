@@ -1,0 +1,318 @@
+package com.chen.reader.ui.bookshelf
+
+import com.chen.reader.NovelReaderOpener
+import com.chen.reader.bookshelf.BookCoverLoader
+import com.chen.reader.bookshelf.BookshelfService
+import com.chen.reader.bookshelf.CoverResult
+import com.chen.reader.bookshelf.ShelfEntry
+import com.chen.reader.bookshelf.ShelfRules
+import com.intellij.openapi.Disposable
+import com.intellij.openapi.project.Project
+import com.intellij.openapi.ui.Messages
+import com.intellij.ui.components.JBList
+import com.intellij.util.ui.JBUI
+import com.intellij.util.ui.UIUtil
+import java.awt.BorderLayout
+import java.awt.Cursor
+import java.awt.Dimension
+import java.awt.Font
+import java.awt.Point
+import java.awt.event.MouseAdapter
+import java.awt.event.MouseEvent
+import java.awt.event.MouseMotionAdapter
+import java.nio.file.Path
+import javax.swing.Box
+import javax.swing.BoxLayout
+import javax.swing.DefaultListModel
+import javax.swing.JButton
+import javax.swing.JLabel
+import javax.swing.JPanel
+import javax.swing.JScrollPane
+import javax.swing.ListModel
+import javax.swing.ListSelectionModel
+import javax.swing.SwingConstants
+import javax.swing.SwingUtilities
+import kotlin.io.path.exists
+
+/** 书架 Tab 的主面板：工具栏 + 「最近阅读」/「我的收藏」两个分区。 */
+class BookshelfPanel(private val project: Project) : JPanel(BorderLayout()), Disposable {
+    private val service: BookshelfService = BookshelfService.getInstance()
+    private val coverLoader: BookCoverLoader = BookCoverLoader.getInstance()
+
+    private val recentModel = DefaultListModel<ShelfEntry>()
+    private val favoriteModel = DefaultListModel<ShelfEntry>()
+    private val recentList = ShelfList(recentModel)
+    private val favoriteList = ShelfList(favoriteModel)
+    private val recentRenderer = BookCard()
+    private val favoriteRenderer = BookCard()
+
+    private val emptyLabel = JLabel("还没有阅读记录，打开一本 TXT / EPUB 后会出现在这里。", SwingConstants.CENTER)
+    private val recentHeader = sectionHeader("最近阅读")
+    private val favoriteHeader = sectionHeader("我的收藏")
+    private val contentPanel = JPanel()
+
+    init {
+        background = UIUtil.getListBackground()
+        contentPanel.layout = BoxLayout(contentPanel, BoxLayout.Y_AXIS)
+        contentPanel.isOpaque = true
+        contentPanel.background = UIUtil.getListBackground()
+        contentPanel.add(emptyLabel)
+        contentPanel.add(recentHeader)
+        contentPanel.add(recentList)
+        contentPanel.add(Box.createVerticalStrut(JBUI.scale(12)))
+        contentPanel.add(favoriteHeader)
+        contentPanel.add(favoriteList)
+        contentPanel.add(Box.createVerticalGlue())
+
+        recentList.cellRenderer = recentRenderer
+        favoriteList.cellRenderer = favoriteRenderer
+        attachInteractions(recentList, recentRenderer)
+        attachInteractions(favoriteList, favoriteRenderer)
+
+        emptyLabel.foreground = UIUtil.getInactiveTextColor()
+        emptyLabel.font = emptyLabel.font.deriveFont(Font.PLAIN)
+        emptyLabel.border = JBUI.Borders.empty(24, 12)
+
+        // 初始态：还没 refresh 过，只显示空态文案（用户升级后可能先切到书架再开书）。
+        recentHeader.isVisible = false
+        recentList.isVisible = false
+        favoriteHeader.isVisible = false
+        favoriteList.isVisible = false
+        emptyLabel.isVisible = true
+
+        add(buildToolbar(), BorderLayout.NORTH)
+        add(JScrollPane(contentPanel).apply { border = JBUI.Borders.empty() }, BorderLayout.CENTER)
+    }
+
+    private fun buildToolbar(): JPanel {
+        val openButton = JButton("打开书籍").apply {
+            addActionListener { NovelReaderOpener.openFromFileChooser(project) }
+        }
+        val clearButton = JButton("清空历史").apply {
+            addActionListener { onClearHistory() }
+        }
+        return JPanel(BorderLayout()).apply {
+            border = JBUI.Borders.empty(4, 6)
+            add(JPanel().apply {
+                isOpaque = false
+                add(openButton)
+                add(clearButton)
+            }, BorderLayout.WEST)
+        }
+    }
+
+    private fun sectionHeader(text: String): JLabel = JLabel(text).apply {
+        font = font.deriveFont(Font.BOLD)
+        foreground = UIUtil.getInactiveTextColor()
+        border = JBUI.Borders.empty(6, 8, 4, 8)
+        alignmentX = LEFT_ALIGNMENT
+    }
+
+    /** 每次切到「书架」Tab 时调用：先同步内存进度，再重建两个分区，最后提交封面请求。 */
+    fun refresh() {
+        // 老用户升级后第一次进书架：从项目级旧 state 播种 1 条（幂等）。
+        service.ensureSeeded(project)
+        // 进度只进内存，靠自动保存带上；这里补一次，保证"刚读到 80% 就切 Tab"也能看到 80%。
+        service.noteProgress(project)
+
+        val recent = service.recent()
+        val favorites = service.favorites()
+        replaceModel(recentModel, recent)
+        replaceModel(favoriteModel, favorites)
+
+        val hasBooks = recent.isNotEmpty()
+        recentHeader.isVisible = hasBooks
+        recentList.isVisible = hasBooks
+        emptyLabel.isVisible = !hasBooks
+        favoriteHeader.isVisible = favorites.isNotEmpty()
+        favoriteList.isVisible = favorites.isNotEmpty()
+
+        requestMissingCovers(recent + favorites)
+        contentPanel.revalidate()
+        contentPanel.repaint()
+    }
+
+    private fun replaceModel(model: DefaultListModel<ShelfEntry>, entries: List<ShelfEntry>) {
+        model.clear()
+        entries.forEach { model.addElement(it) }
+        recentRenderer.hoverIndex = -1
+        favoriteRenderer.hoverIndex = -1
+    }
+
+    /**
+     * 封面是**渐进式**填充：这里只提交请求（最多 [MAX_COVER_REQUESTS] 条），
+     * 真正解码在 `BookCoverLoader` 的单线程后台队列里，完成后 `invokeLater` 回来 repaint。
+     * EDT 上只做 `Files.exists` 这一次 `stat`。
+     */
+    private fun requestMissingCovers(entries: List<ShelfEntry>) {
+        entries.take(MAX_COVER_REQUESTS).forEach { entry ->
+            if (entry.format != "epub") {
+                return@forEach
+            }
+            if (coverLoader.isKnown(entry.pathKey)) {
+                return@forEach
+            }
+            if (runCatching { Path.of(entry.path).exists() }.getOrDefault(false)) {
+                coverLoader.request(entry) { result -> onCoverReady(result) }
+            }
+        }
+    }
+
+    private fun onCoverReady(result: CoverResult) {
+        val titleChanged = service.applyMetaTitle(result.pathKey, result.title)
+        if (titleChanged) {
+            refresh()
+            return
+        }
+        recentList.repaint()
+        favoriteList.repaint()
+    }
+
+    // ------------------------------------------------------------------ 交互
+
+    private fun attachInteractions(list: ShelfList, renderer: BookCard) {
+        list.addMouseListener(object : MouseAdapter() {
+            override fun mouseClicked(event: MouseEvent) {
+                if (!SwingUtilities.isLeftMouseButton(event)) {
+                    return
+                }
+                dispatchClick(list, event)
+            }
+
+            override fun mouseExited(event: MouseEvent) {
+                renderer.hoverIndex = -1
+                renderer.hoverSpot = SPOT_NONE
+                list.repaint()
+            }
+        })
+        list.addMouseMotionListener(object : MouseMotionAdapter() {
+            override fun mouseMoved(event: MouseEvent) {
+                val spot = spotAt(list, event.point)
+                val index = list.locationToIndex(event.point)
+                if (renderer.hoverIndex != index || renderer.hoverSpot != spot) {
+                    renderer.hoverIndex = index
+                    renderer.hoverSpot = spot
+                    list.repaint()
+                }
+                list.cursor = if (spot == SPOT_NONE) {
+                    Cursor.getDefaultCursor()
+                } else {
+                    Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+                }
+            }
+        })
+    }
+
+    /** 行内坐标 → 热区编号。★ / ✕ 不是真按钮，全靠这里分派。 */
+    private fun spotAt(list: ShelfList, point: Point): Int {
+        val index = list.locationToIndex(point)
+        if (index < 0) {
+            return SPOT_NONE
+        }
+        val bounds = list.getCellBounds(index, index) ?: return SPOT_NONE
+        val local = Point(point.x - bounds.x, point.y - bounds.y)
+        return when {
+            BookCard.closeRectFor(bounds.width).contains(local) -> SPOT_CLOSE
+            BookCard.starRectFor(bounds.width).contains(local) -> SPOT_STAR
+            else -> SPOT_NONE
+        }
+    }
+
+    private fun dispatchClick(list: ShelfList, event: MouseEvent) {
+        val index = list.locationToIndex(event.point)
+        if (index < 0 || index >= list.model.size) {
+            return
+        }
+        val entry = list.model.getElementAt(index)
+        val bounds = list.getCellBounds(index, index) ?: return
+        val local = Point(event.x - bounds.x, event.y - bounds.y)
+        when {
+            BookCard.closeRectFor(bounds.width).contains(local) -> onRemove(entry)
+            BookCard.starRectFor(bounds.width).contains(local) -> onToggleFavorite(entry)
+            else -> onOpen(entry)
+        }
+    }
+
+    private fun onOpen(entry: ShelfEntry) {
+        val path = runCatching { Path.of(entry.path) }.getOrNull()
+        if (path == null || !runCatching { path.exists() }.getOrDefault(false)) {
+            val answer = Messages.showYesNoDialog(
+                project,
+                "文件已被移动或删除：\n${entry.path}\n\n是否把它从书架移除？",
+                "无法打开",
+                "从书架移除",
+                "取消",
+                Messages.getWarningIcon(),
+            )
+            if (answer == Messages.YES) {
+                service.remove(entry.pathKey)
+                refresh()
+            }
+            return
+        }
+        NovelReaderOpener.openFromBookshelf(project, entry)
+    }
+
+    private fun onToggleFavorite(entry: ShelfEntry) {
+        service.setFavorite(entry.pathKey, !entry.favorite)
+        refresh()
+    }
+
+    private fun onRemove(entry: ShelfEntry) {
+        service.remove(entry.pathKey)
+        refresh()
+    }
+
+    private fun onClearHistory() {
+        if (service.all().none { !it.favorite }) {
+            return
+        }
+        val answer = Messages.showYesNoDialog(
+            project,
+            "将移除全部未收藏的阅读记录，收藏的书会保留。",
+            "清空历史",
+            "清空",
+            "取消",
+            Messages.getQuestionIcon(),
+        )
+        if (answer != Messages.YES) {
+            return
+        }
+        service.clearHistory()
+        refresh()
+    }
+
+    override fun dispose() {
+        recentModel.clear()
+        favoriteModel.clear()
+    }
+
+    /**
+     * 固定行高的列表：高度 = 行数 × `CELL_HEIGHT`，宽度交给 `BoxLayout` 算，
+     * 这样外层那一个 `JBScrollPane` 就是唯一的滚动条，列表自身不滚动。
+     */
+    private class ShelfList(model: ListModel<ShelfEntry>) : JBList<ShelfEntry>(model) {
+        init {
+            selectionMode = ListSelectionModel.SINGLE_SELECTION
+            fixedCellHeight = BookCard.CELL_HEIGHT
+            isOpaque = true
+            background = UIUtil.getListBackground()
+            border = JBUI.Borders.empty()
+        }
+
+        override fun getPreferredSize(): Dimension {
+            val rows = model.size
+            if (rows == 0) {
+                return Dimension(0, 0)
+            }
+            return BookCard.preferredFor(super.getPreferredSize(), rows)
+        }
+
+        override fun getMaximumSize(): Dimension = getPreferredSize()
+    }
+
+    companion object {
+        /** 规模保护：一次最多提交这么多封面请求（历史上限本身只有 [ShelfRules.MAX_RECENT]）。 */
+        private const val MAX_COVER_REQUESTS = 30
+    }
+}

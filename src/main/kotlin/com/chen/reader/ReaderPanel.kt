@@ -1,5 +1,6 @@
 package com.chen.reader
 
+import com.chen.reader.bookshelf.BookshelfService
 import com.chen.reader.model.Book
 import com.chen.reader.model.Chapter
 import com.chen.reader.model.FootnoteHotSpot
@@ -371,6 +372,8 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
 
     fun openBook(path: Path, restoreState: Boolean = false) {
         try {
+            // 书架埋点 1：必须在加载新书【之前】，否则上一本的进度会被这本书的位置覆盖。
+            BookshelfService.getInstance().snapshotFromReaderState(project)
             val state = stateService.state
             val shouldRestoreState = restoreState || isSameBookPath(state.filePath, path)
             val preferredCharset = if (shouldRestoreState) state.charsetName else null
@@ -395,6 +398,9 @@ class ReaderPanel(private val project: Project) : JPanel(BorderLayout()) {
             updateChapterSelector(book.chapters)
             val index = state.chapterIndex.coerceIn(0, book.chapters.lastIndex)
             renderChapter(index, restoreScroll = shouldRestoreState)
+            // 书架埋点 2：加载成功之后登记"打开过这本书"。此时 plainText 已因排版构建完，
+            // book.content.length 是 O(1) 取值，不产生额外解析成本。
+            BookshelfService.getInstance().noteOpened(path, book.content.length, book.charset.name())
         } catch (error: Throwable) {
             Messages.showErrorDialog(project, error.message ?: "打开小说文件失败。", "Novel Reader")
         }
