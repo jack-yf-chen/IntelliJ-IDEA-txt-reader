@@ -26,6 +26,7 @@ import javax.swing.Box
 import javax.swing.BoxLayout
 import javax.swing.DefaultListModel
 import javax.swing.JButton
+import javax.swing.JList
 import javax.swing.JLabel
 import javax.swing.JPanel
 import javax.swing.JScrollPane
@@ -325,7 +326,7 @@ class BookshelfPanel(private val project: Project) : JPanel(BorderLayout()), Dis
     }
 
     /**
-     * 固定行高的列表：高度 = 行数 × `CELL_HEIGHT`，**宽度交给外层 `BoxLayout` 拉满**。
+     * 固定卡片尺寸的网格列表：按当前视口宽度自动换列，宽度交给外层 `BoxLayout` 拉满。
      *
      * 注意 [getMaximumSize] 的宽度必须是 `Int.MAX_VALUE`：`BoxLayout(Y_AXIS)` 是按
      * 组件的**最大尺寸**来分配宽度的，若把最大宽度也写死成首选宽度（渲染器算出来的宽度
@@ -335,6 +336,9 @@ class BookshelfPanel(private val project: Project) : JPanel(BorderLayout()), Dis
     private class ShelfList(model: ListModel<ShelfEntry>) : JBList<ShelfEntry>(model) {
         init {
             selectionMode = ListSelectionModel.SINGLE_SELECTION
+            layoutOrientation = JList.HORIZONTAL_WRAP
+            visibleRowCount = -1
+            fixedCellWidth = BookCard.CELL_WIDTH
             fixedCellHeight = BookCard.CELL_HEIGHT
             isOpaque = true
             background = UIUtil.getListBackground()
@@ -347,11 +351,17 @@ class BookshelfPanel(private val project: Project) : JPanel(BorderLayout()), Dis
         }
 
         override fun getPreferredSize(): Dimension {
-            val rows = model.size
-            if (rows == 0) {
+            val count = model.size
+            if (count == 0) {
                 return Dimension(0, 0)
             }
-            return BookCard.preferredFor(super.getPreferredSize(), rows)
+            val availableWidth = parent?.width
+                ?.takeIf { it > 0 }
+                ?: visibleRect.width.takeIf { it > 0 }
+                ?: BookCard.CELL_WIDTH
+            val columns = (availableWidth / BookCard.CELL_WIDTH).coerceAtLeast(1)
+            val rows = (count + columns - 1) / columns
+            return Dimension(availableWidth.coerceAtLeast(BookCard.CELL_WIDTH), BookCard.CELL_HEIGHT * rows)
         }
 
         override fun getMaximumSize(): Dimension =

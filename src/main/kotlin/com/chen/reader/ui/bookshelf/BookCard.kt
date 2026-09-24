@@ -8,7 +8,6 @@ import com.intellij.util.ui.JBUI
 import com.intellij.util.ui.UIUtil
 import java.awt.Color
 import java.awt.Component
-import java.awt.Dimension
 import java.awt.Font
 import java.awt.Graphics
 import java.awt.Graphics2D
@@ -101,20 +100,26 @@ class BookCard : JPanel(), ListCellRenderer<ShelfEntry> {
             val secondary = if (selected) selectedForeground else UIUtil.getInactiveTextColor()
             val missing = ShelfFormat.isMissing(current)
 
-            // 文本区的右边界**就是 ★ 热区的左边界**，绝不能反向把它撑过图标区：
-            // 原来写的是 `coerceAtLeast(contentX + MIN_CONTENT_WIDTH)`，窄窗口（100% 缩放下
-            // 约 < 224 px）会把标题 / 路径 / 进度条推到 ★ / ✕ 底下叠着画。宽度不够就让
-            // [fitToWidth] 自然截断，宁可少画也不要压住操作入口。
-            val contentX = GAP * 2 + COVER_W
-            val contentWidth = (starRectFor(width).x - contentX - GAP).coerceAtLeast(0)
+            // ---- 标题（最多两行）
+            val titleX = GAP
+            val titleY = GAP + ICON + JBUI.scale(4)
+            val titleWidth = (width - GAP * 2).coerceAtLeast(0)
+            g2.font = listFont.deriveFont(Font.BOLD)
+            val titleColor = if (missing) MISSING_COLOR else primary
+            g2.color = titleColor
+            val titleLines = fitToLines(g2, ShelfFormat.displayTitle(current, missing), titleWidth, MAX_TITLE_LINES)
+            val titleLineHeight = g2.fontMetrics.height
+            titleLines.forEachIndexed { lineIndex, line ->
+                g2.drawString(line, titleX, titleY + g2.fontMetrics.ascent + lineIndex * titleLineHeight)
+            }
 
             // ---- 封面（内存图标，不解码）
             // 必须**等比缩放进封面槽**：`Icon.paintIcon` 是按图标自身尺寸绘制的，而
             // `BookCoverLoader` 给的缩略图最长边是 320 px（b1 实测 216×320），直接
             // `paintIcon` 会画出一张比整行卡片还大的图，把标题 / 路径 / 进度条 / 元信息
             // 全压在底下 —— 实机反馈"封面把卡片内容盖住了"就是这个原因。
-            val coverX = GAP
-            val coverY = (CELL_HEIGHT - COVER_H) / 2
+            val coverX = (width - COVER_W) / 2
+            val coverY = GAP + ICON + TITLE_AREA_H
             val cover = BookCoverLoader.getInstance().coverFor(current.pathKey)
             if (cover != null) {
                 drawCoverFitted(g2, cover, coverX, coverY, COVER_W, COVER_H)
@@ -122,17 +127,7 @@ class BookCard : JPanel(), ListCellRenderer<ShelfEntry> {
                 drawCoverPlaceholder(g2, coverX, coverY, COVER_W, COVER_H)
             }
 
-            // ---- 标题（最多两行）+ 上次阅读时间
-            g2.font = listFont.deriveFont(Font.BOLD)
-            val titleColor = if (missing) MISSING_COLOR else primary
-            g2.color = titleColor
-            val titleLines = fitToLines(g2, ShelfFormat.displayTitle(current, missing), contentWidth, MAX_TITLE_LINES)
-            val titleTop = GAP + JBUI.scale(6)
-            val titleLineHeight = g2.fontMetrics.height
-            titleLines.forEachIndexed { lineIndex, line ->
-                g2.drawString(line, contentX, titleTop + g2.fontMetrics.ascent + lineIndex * titleLineHeight)
-            }
-
+            // ---- 上次阅读时间
             g2.font = listFont.deriveFont(Font.PLAIN, listFont.size2D - 1f)
             g2.color = if (missing) MISSING_COLOR else secondary
             val lastReadText = if (missing) {
@@ -140,7 +135,7 @@ class BookCard : JPanel(), ListCellRenderer<ShelfEntry> {
             } else {
                 "上次阅读：${ShelfFormat.formatLastRead(current.lastReadMillis)}"
             }
-            drawClipped(g2, lastReadText, contentX, CELL_HEIGHT - GAP - JBUI.scale(8), contentWidth)
+            drawClipped(g2, lastReadText, GAP, coverY + COVER_H + LABEL_H, titleWidth)
 
             // ---- ★ / ✕（位置与 starRectFor / closeRectFor 同源）
             val starRect = starRectFor(width)
@@ -291,18 +286,16 @@ class BookCard : JPanel(), ListCellRenderer<ShelfEntry> {
 
     companion object {
         private val GAP = JBUI.scale(8)
-        private val COVER_W = JBUI.scale(76)
-        private val COVER_H = JBUI.scale(112)
+        private val COVER_W = JBUI.scale(104)
+        private val COVER_H = JBUI.scale(150)
         private val ICON = JBUI.scale(24)
+        private val TITLE_AREA_H = JBUI.scale(44)
+        private val LABEL_H = JBUI.scale(20)
         private const val MAX_TITLE_LINES = 2
 
-        /** 卡片固定高度：两个列表共用，也是 `JBList.fixedCellHeight`。 */
-        val CELL_HEIGHT: Int = JBUI.scale(132)
-
-        // 下面几个尺寸阈值一律走 `JBUI.scale`：GAP / COVER_W / ICON 都是
-        // 缩放值，若这里留成未缩放常量，高 DPI（scale=2）下阈值就相对偏小，
-        // "什么时候开始重叠"的判据会随屏幕缩放漂移。
-        private val FALLBACK_WIDTH = JBUI.scale(320)
+        /** 卡片固定尺寸：两个列表共用，也是 `JBList.fixedCellWidth/Height`。 */
+        val CELL_WIDTH: Int = JBUI.scale(164)
+        val CELL_HEIGHT: Int = JBUI.scale(238)
 
         private val HOVER_BACKGROUND = JBColor(0xE8EEF7, 0x2C3542)
         private val HOVER_RING_COLOR = JBColor(0x9AA7B8, 0x5A6B80)
@@ -327,12 +320,5 @@ class BookCard : JPanel(), ListCellRenderer<ShelfEntry> {
         fun closeRectFor(width: Int): Rectangle =
             Rectangle(width - GAP - ICON, GAP, ICON, ICON)
 
-        /**
-         * 行的首选尺寸：高度 = 行数 × 固定行高；宽度务必带上 [FALLBACK_WIDTH] 兜底 ——
-         * 本卡片是**零子组件**的自绘面板，首选宽度算出来是 0，若原样传给外层的
-         * `JScrollPane`，连宽屏下的卡片都会被压成窄条。
-         */
-        fun preferredFor(base: Dimension?, rows: Int): Dimension =
-            Dimension((base?.width ?: 0).coerceAtLeast(FALLBACK_WIDTH), CELL_HEIGHT * rows)
     }
 }
