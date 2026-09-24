@@ -102,7 +102,7 @@ class BookCard : JPanel(), ListCellRenderer<ShelfEntry> {
 
             // ---- 标题（最多两行）
             val titleX = GAP
-            val titleY = GAP + ICON + JBUI.scale(4)
+            val titleY = GAP
             val titleWidth = (width - GAP * 2).coerceAtLeast(0)
             g2.font = listFont.deriveFont(Font.BOLD)
             val titleColor = if (missing) MISSING_COLOR else primary
@@ -119,7 +119,7 @@ class BookCard : JPanel(), ListCellRenderer<ShelfEntry> {
             // `paintIcon` 会画出一张比整行卡片还大的图，把标题 / 路径 / 进度条 / 元信息
             // 全压在底下 —— 实机反馈"封面把卡片内容盖住了"就是这个原因。
             val coverX = (width - COVER_W) / 2
-            val coverY = GAP + ICON + TITLE_AREA_H
+            val coverY = GAP + TITLE_AREA_H
             val cover = BookCoverLoader.getInstance().coverFor(current.pathKey)
             if (cover != null) {
                 drawCoverFitted(g2, cover, coverX, coverY, COVER_W, COVER_H)
@@ -135,11 +135,13 @@ class BookCard : JPanel(), ListCellRenderer<ShelfEntry> {
             } else {
                 "上次阅读：${ShelfFormat.formatLastRead(current.lastReadMillis)}"
             }
-            drawClipped(g2, lastReadText, GAP, coverY + COVER_H + LABEL_H, titleWidth)
-
-            // ---- ★ / ✕（位置与 starRectFor / closeRectFor 同源）
             val starRect = starRectFor(width)
             val closeRect = closeRectFor(width)
+            val footerTextWidth = (starRect.x - GAP * 2).coerceAtLeast(0)
+            val footerBaseline = starRect.y + (starRect.height - g2.fontMetrics.height) / 2 + g2.fontMetrics.ascent
+            drawClipped(g2, lastReadText, GAP, footerBaseline, footerTextWidth)
+
+            // ---- ★ / ✕（底部右侧，避免占用书名和封面区域）
             g2.font = listFont.deriveFont(Font.PLAIN, listFont.size2D + 4f)
             g2.color = when {
                 current.favorite -> STAR_ON_COLOR
@@ -290,12 +292,11 @@ class BookCard : JPanel(), ListCellRenderer<ShelfEntry> {
         private val COVER_H = JBUI.scale(150)
         private val ICON = JBUI.scale(24)
         private val TITLE_AREA_H = JBUI.scale(44)
-        private val LABEL_H = JBUI.scale(20)
         private const val MAX_TITLE_LINES = 2
 
         /** 卡片固定尺寸：两个列表共用，也是 `JBList.fixedCellWidth/Height`。 */
         val CELL_WIDTH: Int = JBUI.scale(164)
-        val CELL_HEIGHT: Int = JBUI.scale(238)
+        val CELL_HEIGHT: Int = JBUI.scale(252)
 
         private val HOVER_BACKGROUND = JBColor(0xE8EEF7, 0x2C3542)
         private val HOVER_RING_COLOR = JBColor(0x9AA7B8, 0x5A6B80)
@@ -314,11 +315,11 @@ class BookCard : JPanel(), ListCellRenderer<ShelfEntry> {
          * 所以"画在哪"与"点哪算"不可能错位。
          */
         fun starRectFor(width: Int): Rectangle =
-            Rectangle(width - GAP - ICON * 2 - GAP, GAP, ICON, ICON)
+            Rectangle(width - GAP - ICON * 2 - GAP, CELL_HEIGHT - GAP - ICON, ICON, ICON)
 
         /** ✕ 的热区矩形，同上。 */
         fun closeRectFor(width: Int): Rectangle =
-            Rectangle(width - GAP - ICON, GAP, ICON, ICON)
+            Rectangle(width - GAP - ICON, CELL_HEIGHT - GAP - ICON, ICON, ICON)
 
     }
 }
