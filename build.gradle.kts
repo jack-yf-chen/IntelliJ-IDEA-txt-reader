@@ -5,10 +5,16 @@ plugins {
 }
 
 group = "com.chen.reader"
-version = "0.11.3"
+version = "0.11.4"
 
 kotlin {
     jvmToolchain(21)
+
+    sourceSets {
+        main {
+            kotlin.exclude("**/probe/**")
+        }
+    }
 }
 
 dependencies {

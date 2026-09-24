@@ -34,6 +34,7 @@ import javax.swing.ListSelectionModel
 import javax.swing.Scrollable
 import javax.swing.SwingConstants
 import javax.swing.SwingUtilities
+import javax.swing.ToolTipManager
 import kotlin.io.path.exists
 
 /** 书架 Tab 的主面板：工具栏 + 「最近阅读」/「我的收藏」两个分区。 */
@@ -342,6 +343,7 @@ class BookshelfPanel(private val project: Project) : JPanel(BorderLayout()), Dis
             // `LEFT_ALIGNMENT`。混用会让 `BoxLayout` 算出一个约 0.01 的整体对齐值，
             // 结果是列表相对标题右移几个像素、且略微变窄。
             alignmentX = LEFT_ALIGNMENT
+            ToolTipManager.sharedInstance().registerComponent(this)
         }
 
         override fun getPreferredSize(): Dimension {
@@ -354,6 +356,47 @@ class BookshelfPanel(private val project: Project) : JPanel(BorderLayout()), Dis
 
         override fun getMaximumSize(): Dimension =
             Dimension(Int.MAX_VALUE, getPreferredSize().height)
+
+        override fun getToolTipText(event: MouseEvent): String? {
+            val index = locationToIndex(event.point)
+            if (index < 0 || index >= model.size) {
+                return null
+            }
+            val bounds = getCellBounds(index, index) ?: return null
+            if (!bounds.contains(event.point)) {
+                return null
+            }
+            val local = Point(event.x - bounds.x, event.y - bounds.y)
+            if (BookCard.closeRectFor(bounds.width).contains(local) ||
+                BookCard.starRectFor(bounds.width).contains(local)
+            ) {
+                return null
+            }
+            return tooltipFor(model.getElementAt(index))
+        }
+
+        private fun tooltipFor(entry: ShelfEntry): String {
+            val missing = ShelfFormat.isMissing(entry)
+            val title = ShelfFormat.displayTitle(entry, missing)
+            val status = if (missing) "文件已被移动或删除" else "可继续阅读"
+            return buildString {
+                append("<html>")
+                append("<b>").append(escapeHtml(title)).append("</b><br>")
+                append("上次阅读：").append(escapeHtml(ShelfFormat.formatLastRead(entry.lastReadMillis))).append("<br>")
+                append("阅读进度：").append(escapeHtml(ShelfFormat.formatPercent(entry.percent()))).append("<br>")
+                append("文件格式：").append(escapeHtml(entry.format.uppercase())).append("<br>")
+                append("状态：").append(escapeHtml(status)).append("<br>")
+                append("路径：").append(escapeHtml(entry.path))
+                append("</html>")
+            }
+        }
+
+        private fun escapeHtml(text: String): String =
+            text
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\"", "&quot;")
     }
 
     /**

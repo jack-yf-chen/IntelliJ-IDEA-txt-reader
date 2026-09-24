@@ -261,6 +261,10 @@
   - **修法**：新增 `drawCoverFitted(g, icon, boxX, boxY, boxW, boxH)` —— `scale = min(boxW/iconW, boxH/iconH)` 等比缩到槽内并居中，`ImageIcon` 走 `drawImage` + 双线性插值（比变换矩阵快且不失真），其它 `Icon` 走 `translate + scale + paintIcon`，统一在 `try/finally` 里保存恢复 `g.transform`；最后描一圈淡边与卡片底色分界。没有封面时改走 `drawCoverPlaceholder`（淡底 + 居中默认图标），**故意不放大**占位图标 —— 它是 16×16 的 SVG 光栅化结果，拉满 64×96 只会糊，尺寸装不下时干脆只留空槽。
   - **教训（写进备忘）**：**`Icon.paintIcon` 不缩放到目标框，它按图标自身尺寸画。** 自绘时凡是「图标 / 图片」都要显式算缩放；容器裁剪消失（子组件 → 自绘）时，这类隐患会从「不好看」升级成「盖住别的元素」。
   - 实测：`compileKotlin` 与 `buildPlugin` 通过，重新出包 `intellij-idea-novel-reader-0.11.3.zip`。
+- 2026-09-24：**升 `0.11.4`（patch，`plainText` 一字未变），再次收敛书架卡片信息密度**。用户截图反馈：封面仍显得变形，书籍信息压到封面区域，卡片里路径、进度等信息过多。
+  - **修法**：`BookCard` 常驻只绘制「封面 + 书名 + 上次阅读时间」；封面槽从 64×96 调整到 76×112，并在 `drawCoverFitted` 里增加封面槽裁剪和槽底色填充，确保真实封面永远只在封面框内等比显示；路径、阅读进度、格式和状态改由 `ShelfList.getToolTipText` 悬浮显示，悬浮到 ★ / ✕ 热区时不弹 tooltip，避免遮挡操作入口。
+  - **行为口径**：书名最多两行，超出省略；上次阅读时间常驻在卡片底部；缺失文件仍用红色状态提示。书架持久化、阅读进度写入、收藏/移除热区和阅读恢复逻辑均未改动。
+  - 实测：`buildPlugin` 通过，出包 `intellij-idea-novel-reader-0.11.4.zip`。
 
 ## 后续验证步骤
 

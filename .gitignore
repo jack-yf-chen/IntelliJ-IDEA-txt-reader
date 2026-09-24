@@ -5,3 +5,5 @@ out/
 .idea/
 *.iml
 .workbuddy/
+probe-*.txt
+src/main/kotlin/com/chen/reader/probe/

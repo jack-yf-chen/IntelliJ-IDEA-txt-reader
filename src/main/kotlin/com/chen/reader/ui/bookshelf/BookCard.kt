@@ -37,9 +37,8 @@ const val SPOT_CLOSE = 2
  * 自己画既避开了这个坑，也保证"看到的位置"与 [starRectFor] / [closeRectFor]
  * 描述的热区**必然一致**（两者共用 [ICON] / [GAP] 常量）。
  *
- * **另外不设 `toolTipText`**：悬浮 tooltip 会盖住卡片右侧的 ★/✕（用户必须先把鼠标
- * 移到卡片上才能点它们，于是永远被盖住）。完整路径改为**画在卡片里**（中间省略），
- * 文件缺失也在卡片里直接标红。
+ * 卡片常驻信息只放书名和上次阅读时间；路径、格式、进度等详情交给列表 tooltip。
+ * 这样窄窗口下不会再把文字、进度条和操作入口挤到封面上。
  *
  * **EDT 零 IO**：封面只从 `BookCoverLoader.coverFor` 读内存，绝不在这里触发任何加载。
  */
@@ -107,9 +106,7 @@ class BookCard : JPanel(), ListCellRenderer<ShelfEntry> {
             // 约 < 224 px）会把标题 / 路径 / 进度条推到 ★ / ✕ 底下叠着画。宽度不够就让
             // [fitToWidth] 自然截断，宁可少画也不要压住操作入口。
             val contentX = GAP * 2 + COVER_W
-            val contentWidth = (starRectFor(width).x - contentX).coerceAtLeast(0)
-            val percentWidth = PERCENT_W.coerceAtMost(contentWidth)
-            val barWidth = contentWidth - percentWidth - GAP
+            val contentWidth = (starRectFor(width).x - contentX - GAP).coerceAtLeast(0)
 
             // ---- 封面（内存图标，不解码）
             // 必须**等比缩放进封面槽**：`Icon.paintIcon` 是按图标自身尺寸绘制的，而
@@ -125,47 +122,25 @@ class BookCard : JPanel(), ListCellRenderer<ShelfEntry> {
                 drawCoverPlaceholder(g2, coverX, coverY, COVER_W, COVER_H)
             }
 
-            // ---- 标题
+            // ---- 标题（最多两行）+ 上次阅读时间
             g2.font = listFont.deriveFont(Font.BOLD)
-            g2.color = primary
-            drawClipped(g2, ShelfFormat.displayTitle(current, missing), contentX, GAP + TITLE_H - JBUI.scale(5), contentWidth)
+            val titleColor = if (missing) MISSING_COLOR else primary
+            g2.color = titleColor
+            val titleLines = fitToLines(g2, ShelfFormat.displayTitle(current, missing), contentWidth, MAX_TITLE_LINES)
+            val titleTop = GAP + JBUI.scale(6)
+            val titleLineHeight = g2.fontMetrics.height
+            titleLines.forEachIndexed { lineIndex, line ->
+                g2.drawString(line, contentX, titleTop + g2.fontMetrics.ascent + lineIndex * titleLineHeight)
+            }
 
-            // ---- 路径（中间省略，替代原来会遮挡卡片的 tooltip）
             g2.font = listFont.deriveFont(Font.PLAIN, listFont.size2D - 1f)
-            g2.color = secondary
-            drawClipped(g2, truncateMiddle(current.path, PATH_MAX_CHARS), contentX, GAP + TITLE_H + PATH_H - JBUI.scale(4), contentWidth)
-
-            // ---- 进度条 + 百分比
-            val barY = GAP + TITLE_H + PATH_H + JBUI.scale(3)
-            val percent = current.percent()
-            // 进度条窄到看不出进度时（barWidth < MIN_BAR_WIDTH）干脆不画，
-            // 免得它贴着百分比文字底下；百分比文字同理，宽度不够就整块略过。
-            if (percent != null && barWidth >= MIN_BAR_WIDTH) {
-                g2.color = BAR_TRACK_COLOR
-                g2.fillRect(contentX, barY, barWidth, BAR_H)
-                g2.color = if (selected) selectedForeground else BAR_FILL_COLOR
-                g2.fillRect(contentX, barY, (barWidth * percent / 100).coerceIn(0, barWidth), BAR_H)
-            }
-            if (percentWidth >= MIN_PERCENT_WIDTH) {
-                g2.font = listFont.deriveFont(Font.PLAIN, listFont.size2D - 1f)
-                g2.color = secondary
-                drawRightAligned(
-                    g2,
-                    ShelfFormat.formatPercent(percent),
-                    contentX + contentWidth - percentWidth,
-                    barY - JBUI.scale(4),
-                    percentWidth,
-                )
-            }
-
-            // ---- 元信息
-            val metaText = if (missing) {
+            g2.color = if (missing) MISSING_COLOR else secondary
+            val lastReadText = if (missing) {
                 "文件已被移动或删除"
             } else {
-                "${ShelfFormat.formatLastRead(current.lastReadMillis)} · ${current.format.uppercase()}"
+                "上次阅读：${ShelfFormat.formatLastRead(current.lastReadMillis)}"
             }
-            g2.color = if (missing) MISSING_COLOR else secondary
-            drawClipped(g2, metaText, contentX, barY + BAR_H + LABEL_H - JBUI.scale(4), contentWidth)
+            drawClipped(g2, lastReadText, contentX, CELL_HEIGHT - GAP - JBUI.scale(8), contentWidth)
 
             // ---- ★ / ✕（位置与 starRectFor / closeRectFor 同源）
             val starRect = starRectFor(width)
@@ -210,7 +185,11 @@ class BookCard : JPanel(), ListCellRenderer<ShelfEntry> {
         val x = boxX + (boxW - drawW) / 2
         val y = boxY + (boxH - drawH) / 2
         val old = g.transform
+        val oldClip = g.clip
         try {
+            g.clip = Rectangle(boxX, boxY, boxW, boxH)
+            g.color = COVER_PLACEHOLDER_COLOR
+            g.fillRect(boxX, boxY, boxW, boxH)
             val image = (icon as? ImageIcon)?.image
             if (image != null) {
                 g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
@@ -222,9 +201,10 @@ class BookCard : JPanel(), ListCellRenderer<ShelfEntry> {
             }
         } finally {
             g.transform = old
+            g.clip = oldClip
         }
         g.color = COVER_BORDER_COLOR
-        g.drawRect(x, y, drawW - 1, drawH - 1)
+        g.drawRect(boxX, boxY, boxW - 1, boxH - 1)
     }
 
     /**
@@ -250,11 +230,6 @@ class BookCard : JPanel(), ListCellRenderer<ShelfEntry> {
         g.drawString(fitted, x, baseline)
     }
 
-    private fun drawRightAligned(g: Graphics2D, text: String, x: Int, baseline: Int, maxWidth: Int) {
-        val fitted = fitToWidth(g, text, maxWidth)
-        g.drawString(fitted, x + maxWidth - g.fontMetrics.stringWidth(fitted), baseline)
-    }
-
     private fun drawCentered(g: Graphics2D, text: String, rect: Rectangle) {
         val fm = g.fontMetrics
         g.drawString(
@@ -266,6 +241,9 @@ class BookCard : JPanel(), ListCellRenderer<ShelfEntry> {
 
     /** 超宽就截断加省略号；`ellipsis` 也量不出来时返回空串，绝不画出界。 */
     private fun fitToWidth(g: Graphics2D, text: String, maxWidth: Int): String {
+        if (maxWidth <= 0) {
+            return ""
+        }
         val fm = g.fontMetrics
         if (fm.stringWidth(text) <= maxWidth) {
             return text
@@ -283,45 +261,54 @@ class BookCard : JPanel(), ListCellRenderer<ShelfEntry> {
         return if (ellipsisWidth <= maxWidth) ellipsis else ""
     }
 
-    /** 路径太长时中间省略，保留盘符与文件名两端的辨识信息。 */
-    private fun truncateMiddle(text: String, maxChars: Int): String {
-        if (text.length <= maxChars) {
-            return text
+    /** 把长标题折成固定行数；最后一行自动省略，避免文字盖住封面或操作入口。 */
+    private fun fitToLines(g: Graphics2D, text: String, maxWidth: Int, maxLines: Int): List<String> {
+        if (maxWidth <= 0 || maxLines <= 0) {
+            return emptyList()
         }
-        val head = maxChars / 2
-        val tail = maxChars - head - 1
-        return text.substring(0, head) + "…" + text.substring(text.length - tail)
+        val lines = mutableListOf<String>()
+        var start = 0
+        while (start < text.length && lines.size < maxLines) {
+            var end = text.length
+            var fitted = text.substring(start, end)
+            while (end > start && g.fontMetrics.stringWidth(fitted) > maxWidth) {
+                end--
+                fitted = text.substring(start, end)
+            }
+            if (end <= start) {
+                lines += fitToWidth(g, text.substring(start), maxWidth)
+                break
+            }
+            if (lines.size == maxLines - 1 && end < text.length) {
+                lines += fitToWidth(g, text.substring(start), maxWidth)
+                break
+            }
+            lines += fitted
+            start = end
+        }
+        return lines
     }
 
     companion object {
         private val GAP = JBUI.scale(8)
-        private val COVER_W = JBUI.scale(64)
-        private val COVER_H = JBUI.scale(96)
+        private val COVER_W = JBUI.scale(76)
+        private val COVER_H = JBUI.scale(112)
         private val ICON = JBUI.scale(24)
-        private val TITLE_H = JBUI.scale(20)
-        private val PATH_H = JBUI.scale(16)
-        private val LABEL_H = JBUI.scale(16)
-        private val BAR_H = JBUI.scale(8)
-        private val PERCENT_W = JBUI.scale(44)
+        private const val MAX_TITLE_LINES = 2
 
         /** 卡片固定高度：两个列表共用，也是 `JBList.fixedCellHeight`。 */
-        val CELL_HEIGHT: Int = JBUI.scale(120)
+        val CELL_HEIGHT: Int = JBUI.scale(132)
 
-        // 下面几个尺寸阈值一律走 `JBUI.scale`：GAP / COVER_W / ICON / PERCENT_W 都是
+        // 下面几个尺寸阈值一律走 `JBUI.scale`：GAP / COVER_W / ICON 都是
         // 缩放值，若这里留成未缩放常量，高 DPI（scale=2）下阈值就相对偏小，
         // "什么时候开始重叠"的判据会随屏幕缩放漂移。
         private val FALLBACK_WIDTH = JBUI.scale(320)
-        private val MIN_BAR_WIDTH = JBUI.scale(40)
-        private val MIN_PERCENT_WIDTH = JBUI.scale(24)
-        private const val PATH_MAX_CHARS = 72
 
         private val HOVER_BACKGROUND = JBColor(0xE8EEF7, 0x2C3542)
         private val HOVER_RING_COLOR = JBColor(0x9AA7B8, 0x5A6B80)
         private val STAR_ON_COLOR = JBColor(0xE0A800, 0xF0C040)
         private val STAR_HOVER_COLOR = JBColor(0xB08A00, 0xD0A030)
         private val CLOSE_HOVER_COLOR = JBColor(0xC0392B, 0xE06C5A)
-        private val BAR_TRACK_COLOR = JBColor(0xD5DAE0, 0x3A4350)
-        private val BAR_FILL_COLOR = JBColor(0x4A6FA5, 0x6E9BD8)
         private val MISSING_COLOR = JBColor(0xC0392B, 0xE06C5A)
         private val COVER_BORDER_COLOR = JBColor(0xC8CED6, 0x4A5464)
         private val COVER_PLACEHOLDER_COLOR = JBColor(0xEDF0F4, 0x333C49)
